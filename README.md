@@ -3,6 +3,7 @@
 ## Base Application
 Frontend: React (+ Astro)
 Backend: Spring Boot oder Express => da muss mach noch schauen wegen FaaS
+
 -> nodejs
 
 (Database: MySQL oder MongoDB)
