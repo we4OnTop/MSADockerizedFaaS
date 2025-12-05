@@ -1,14 +1,26 @@
-import docker 
+import docker
+from datetime import datetime
 
-class orchestrationManager:
+class OrchestrationManager:
     def __init__(self):
         self.client = docker.from_env()
 
-        # TODO: Build images 
-        # TODO: Start base image 
+    def build_image(self, context_path: str, dockerfile: str, tag: str) -> str:
+        image, _ = self.client.images.build(
+            path=context_path,
+            dockerfile=dockerfile,
+            # tag=tag,
+        )
+        return image.tags[0] if image.tags else image.id
 
-    def startContainer(self, imageName):
-        self.client.containers.run(imageName, detach=True)
+    def start_container(self, image_ref: str, name: str | None = None, **run_kwargs) -> str:
+        container = self.client.containers.run(
+            image_ref,
+            detach=True,
+            name=name,
+            **run_kwargs,
+        )
+        return container.id
 
-    def stopContainer(self, containerID):
-        self.client.containers.get(container_id=containerID).stop()
+    def stop_container(self, container_id: str):
+        self.client.containers.get(container_id).stop()
