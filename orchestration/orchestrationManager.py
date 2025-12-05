@@ -5,6 +5,7 @@ class OrchestrationManager:
     def __init__(self):
         self.client = docker.from_env()
 
+
     def build_image(self, context_path: str, dockerfile: str, tag: str) -> str:
         image, _ = self.client.images.build(
             path=context_path,
@@ -24,3 +25,10 @@ class OrchestrationManager:
 
     def stop_container(self, container_id: str):
         self.client.containers.get(container_id).stop()
+
+    def check_container_status(self, container_id):
+        container = self.client.containers.get(container_id=container_id)
+        container.status
+        stats = container.stats(stream=False)
+
+        return stats.keys()
