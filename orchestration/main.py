@@ -1,5 +1,8 @@
+from orchestrationManager import orchestrationManager
+
 def main():
-    print("Hello from orchestration!")
+    orchestrationManager()
+
 
 
 if __name__ == "__main__":
