@@ -5,297 +5,210 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"time"
+	// Generic xDS imports
+	"google.golang.org/grpc"
+	"google.golang.org/protobuf/types/known/anypb"
 
-	"github.com/envoyproxy/go-control-plane/envoy/api/v2/listener"
-	cluster "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
-	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
-	endpoint "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
-	route "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
-	discoverygrpc "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
+	// Envoy Control Plane Core
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/resource/v3"
-	serverv3 "github.com/envoyproxy/go-control-plane/pkg/server/v3"
+	xds "github.com/envoyproxy/go-control-plane/pkg/server/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
-	"google.golang.org/grpc"
-	"google.golang.org/protobuf/types/known/anypb"
+
+	// Discovery Services (The xDS APIs)
+	clusterservice "github.com/envoyproxy/go-control-plane/envoy/service/cluster/v3"
+	discoverygrpc "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
+	endpointservice "github.com/envoyproxy/go-control-plane/envoy/service/endpoint/v3"
+	listenerservice "github.com/envoyproxy/go-control-plane/envoy/service/listener/v3"
+	routeservice "github.com/envoyproxy/go-control-plane/envoy/service/route/v3"
+
+	// Resource Definitions
+	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
+	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
+	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
+	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	hcm "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 )
 
-var (
-	snapshotCache cache.SnapshotCache
-	nodeID        = "node1"
+// CONFIGURATION BASED ON YOUR YAML
+const (
+	GrpcPort = ":50051"     // Matches 'port_value: 50051' in your YAML
+	NodeID   = "local_node" // Matches 'id: local_node' in your YAML
 )
-
-// ---------------- Helper Functions ----------------
-
-func duration(seconds int) *time.Duration {
-	d := time.Duration(seconds) * time.Second
-	return &d
-}
-
-func socketAddress(ip string, port uint32) *core.Address {
-	return &core.Address{
-		Address: &core.Address_SocketAddress{
-			SocketAddress: &core.SocketAddress{
-				Address: ip,
-				PortSpecifier: &core.SocketAddress_PortValue{
-					PortValue: port,
-				},
-			},
-		},
-	}
-}
-
-// Create a static cluster with a list of hosts
-func newStaticCluster(name string, hosts []string, port uint32) *cluster.Cluster {
-	var lbEndpoints []*endpoint.LbEndpoint
-
-	for _, h := range hosts {
-		lbEndpoints = append(lbEndpoints, &endpoint.LbEndpoint{
-			HostIdentifier: &endpoint.LbEndpoint_Endpoint{
-				Endpoint: &endpoint.Endpoint{
-					Address: socketAddress(h, port),
-				},
-			},
-		})
-	}
-
-	return &cluster.Cluster{
-		Name:                 name,
-		ConnectTimeout:       duration(1),
-		ClusterDiscoveryType: &cluster.Cluster_Type{Type: cluster.Cluster_STATIC},
-		LbPolicy:             cluster.Cluster_ROUND_ROBIN,
-		LoadAssignment: &endpoint.ClusterLoadAssignment{
-			ClusterName: name,
-			Endpoints: []*endpoint.LocalityLbEndpoints{
-				{
-					LbEndpoints: lbEndpoints,
-				},
-			},
-		},
-	}
-}
-
-// Build a simple route configuration
-func newRouteConfig(routeName, clusterName string) *route.RouteConfiguration {
-	return &route.RouteConfiguration{
-		Name: routeName,
-		VirtualHosts: []*route.VirtualHost{
-			{
-				Name:    "backend",
-				Domains: []string{"*"},
-				Routes: []*route.Route{
-					{
-						Match: &route.RouteMatch{
-							PathSpecifier: &route.RouteMatch_Prefix{Prefix: "/"},
-						},
-						Action: &route.Route_Route{
-							Route: &route.RouteAction{
-								Cluster: clusterName,
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-}
-
-// Create a listener with HTTP Connection Manager
-func addNewCluster(nodeID string, name string, hosts []string, port uint32) error {
-	// 1. Get the existing snapshot
-	// Ensure 'snap' is explicitly defined if your IDE is confused
-	snap, err := snapshotCache.GetSnapshot(nodeID)
-	if err != nil {
-		// If no snapshot exists, we might need to create a fresh one
-		return fmt.Errorf("no snapshot found for node %s: %v", nodeID, err)
-	}
-
-	// 2. Prepare the new Cluster
-	newCluster := newStaticCluster(name, hosts, port)
-
-	// 3. READ: Use 'types' (Integer) to get existing resources from the array
-	//    snap.Resources is an array [8]VersionedResources, indexed by INT.
-	existingClusters := snap.GetResources(resource.ClusterType)
-	existingRoutes := snap.GetResources(resource.RouteType)
-	existingListeners := snap.GetResources(resource.ListenerType)
-
-	// 4. Convert Maps to Slices (Snapshot requires slices)
-	//    We append our new cluster to the existing list here.
-	var clusters []types.Resource
-	for _, c := range existingClusters {
-		clusters = append(clusters, c)
-	}
-	clusters = append(clusters, newCluster)
-
-	var routes []types.Resource
-	for _, r := range existingRoutes {
-		routes = append(routes, r)
-	}
-
-	var listeners []types.Resource
-	for _, l := range existingListeners {
-		listeners = append(listeners, l)
-	}
-
-	// 5. WRITE: Use 'resource' (String) to create the new snapshot
-	//    NewSnapshot expects a map keyed by STRING (Type URL).
-	newSnap, err := cache.NewSnapshot(
-		fmt.Sprintf("%d", time.Now().UnixNano()), // Version must be unique
-		map[resource.Type][]types.Resource{
-			resource.ClusterType:  clusters,
-			resource.RouteType:    routes,
-			resource.ListenerType: listeners,
-		},
-	)
-	if err != nil {
-		return err
-	}
-
-	return snapshotCache.SetSnapshot(context.Background(), nodeID, newSnap)
-}
-
-func newListener(name, routeName string, port uint32) *listener.Listener {
-	hcm := &listener.HttpConnectionManager{
-		StatPrefix: "ingress_http",
-		RouteSpecifier: &listener.HttpConnectionManager_RouteConfig{
-			RouteConfig: newRouteConfig(routeName, "example_cluster"),
-		},
-		HttpFilters: []*listener.HttpFilter{
-			{Name: wellknown.Router},
-		},
-	}
-
-	anyHCM, _ := anypb.New(hcm)
-
-	return &listener.Listener{
-		Name:    name,
-		Address: socketAddress("0.0.0.0", port),
-		FilterChains: []*listener.FilterChain{
-			{
-				Filters: []*listener.Filter{
-					{
-						Name: wellknown.HTTPConnectionManager,
-						ConfigType: &listener.Filter_TypedConfig{
-							TypedConfig: anyHCM,
-						},
-					},
-				},
-			},
-		},
-	}
-}
-
-// ---------------- Snapshot Management ----------------
-
-// Initialize a snapshot with a cluster, route, listener
-func setInitialSnapshot() error {
-	clusterRes := newStaticCluster("example_cluster", []string{"127.0.0.1"}, 8080)
-	listenerRes := newListener("listener_0", "local_route", 10000)
-
-	snap, err := cache.NewSnapshot(
-		"1",
-		map[resource.Type][]types.Resource{
-			resource.ClusterType:  {clusterRes},
-			resource.RouteType:    {newRouteConfig("local_route", "example_cluster")},
-			resource.ListenerType: {listenerRes},
-		},
-	)
-	if err != nil {
-		return err
-	}
-
-	return snapshotCache.SetSnapshot(context.Background(), nodeID, snap)
-}
-
-func addNewCluster(name string, hosts []string, port uint32) error {
-	// 1. Get the existing snapshot
-	snap, err := snapshotCache.GetSnapshot(nodeID)
-	if err != nil {
-		// Handle case where snapshot doesn't exist yet (init new one)
-		// For now, we assume it exists or you return error
-		return err
-	}
-
-	// 2. Prepare the new Cluster
-	newCluster := newStaticCluster(name, hosts, port)
-
-	// 3. Extract EXISTING clusters from the map and convert to Slice
-	//    Note: snap.Resources[type].Items is a map[string]types.Resource
-	var clusters []types.Resource
-	for _, cl := range snap.GetResources(resource.ClusterType) {
-		clusters = append(clusters, cl)
-	}
-
-	// 4. Append the NEW cluster
-	clusters = append(clusters, newCluster)
-
-	// 5. You must also preserve Routes and Listeners (convert them to slices too)
-	//    or they will be deleted in the new snapshot!
-	routes := mapToSlice(snap.GetResources(resource.RouteType))
-	listeners := mapToSlice(snap.GetResources(resource.ListenerType))
-
-	// 6. Create the New Snapshot
-	//    NewSnapshot expects map[resource.Type][]types.Resource
-	newSnap, err := cache.NewSnapshot(
-		"2", // Ideally, increment this version number dynamically
-		map[resource.Type][]types.Resource{
-			resource.ClusterType:  clusters,
-			resource.RouteType:    routes,
-			resource.ListenerType: listeners,
-		},
-	)
-	if err != nil {
-		return err
-	}
-
-	return snapshotCache.SetSnapshot(context.Background(), nodeID, newSnap)
-}
-
-// Helper to convert the internal Map to a Slice
-func mapToSlice(items map[string]types.Resource) []types.Resource {
-	var out []types.Resource
-	for _, item := range items {
-		out = append(out, item)
-	}
-	return out
-}
-
-// ---------------- Main ----------------
 
 func main() {
-	// Create snapshot cache
-	snapshotCache = cache.NewSnapshotCache(false, cache.IDHash{}, nil)
+	// 1. Initialize the Snapshot Cache
+	// We use IDHash{} so it matches based on the Node ID string exactly
+	snapshotCache := cache.NewSnapshotCache(false, cache.IDHash{}, nil)
 
-	// Start xDS server
-	srv := serverv3.NewServer(context.Background(), snapshotCache, nil)
+	// 2. Initialize the xDS Server
+	ctx := context.Background()
+	srv := xds.NewServer(ctx, snapshotCache, nil)
 	grpcServer := grpc.NewServer()
-	discoverygrpc.RegisterAggregatedDiscoveryServiceServer(grpcServer, srv)
 
-	// Set initial snapshot
-	if err := setInitialSnapshot(); err != nil {
-		log.Fatalf("Failed to set snapshot: %v", err)
+	// 3. Register xDS implementations
+	discoverygrpc.RegisterAggregatedDiscoveryServiceServer(grpcServer, srv)
+	endpointservice.RegisterEndpointDiscoveryServiceServer(grpcServer, srv)
+	clusterservice.RegisterClusterDiscoveryServiceServer(grpcServer, srv)
+	routeservice.RegisterRouteDiscoveryServiceServer(grpcServer, srv)
+	listenerservice.RegisterListenerDiscoveryServiceServer(grpcServer, srv)
+
+	// 4. Create the Listener (The socket)
+	lis, err := net.Listen("tcp", GrpcPort)
+	if err != nil {
+		log.Fatalf("failed to listen on %s: %v", GrpcPort, err)
 	}
 
-	// Optionally, add a new cluster dynamically after startup
+	// 5. SEED DATA: Create an initial snapshot
+	// Without this, Envoy connects but receives nothing.
+	log.Println("Creating initial snapshot...")
+	snap := generateSnapshot("v1")
+	if err := snapshotCache.SetSnapshot(ctx, NodeID, &snap); err != nil {
+		log.Printf("Snapshot error: %v", err)
+	}
+
+	// 6. Start the "Inspector" Loop (IN A GOROUTINE)
+	// IMPORTANT: This must be in a 'go func', otherwise it blocks the server start!
 	go func() {
-		time.Sleep(5 * time.Second)
-		if err := addNewCluster(nodeID, "payments_cluster", []string{"127.0.0.2"}, 9090); err != nil {
-			log.Printf("Failed to add new cluster: %v", err)
-		} else {
-			log.Println("New cluster 'payments_cluster' added")
+		for {
+			PrintXdsSnapshot(snapshotCache, NodeID)
 		}
 	}()
 
-	// Listen for Envoy connections
-	lis, err := net.Listen("tcp", ":18000")
+	log.Printf("Control Plane running on %s. Waiting for Envoy node: %s", GrpcPort, NodeID)
+
+	// 7. Start Serving
+	if err := grpcServer.Serve(lis); err != nil {
+		fmt.Printf("Server error: %v", err)
+	}
+}
+
+// --- YOUR INSPECTOR FUNCTION (Slightly polished) ---
+
+func PrintXdsSnapshot(c cache.SnapshotCache, nodeID string) {
+	snap, err := c.GetSnapshot(nodeID)
 	if err != nil {
-		log.Fatalf("Failed to listen: %v", err)
+		// Only log this if you want to see noise before Envoy connects
+		// log.Printf("xDS: No snapshot found for node '%s'", nodeID)
+		return
 	}
 
-	log.Println("xDS server running on :18000")
-	if err := grpcServer.Serve(lis); err != nil {
-		log.Fatalf("gRPC server failed: %v", err)
+	// Fetch Cluster Resources
+	clusterResources := snap.GetResources(resource.ClusterType)
+
+	fmt.Printf("\n--- xDS Snapshot Version: %s (Node: %s) ---\n", snap.GetVersion(resource.ClusterType), nodeID)
+	fmt.Printf("%-20s | %-15s | %s\n", "CLUSTER NAME", "TYPE", "LB POLICY")
+	fmt.Println("-------------------------------------------------------------")
+
+	for _, res := range clusterResources {
+		cluster, ok := res.(*clusterv3.Cluster)
+		if !ok {
+			continue
+		}
+
+		cw := "Static/DNS"
+		if cluster.GetType() == clusterv3.Cluster_EDS {
+			cw = "EDS (Dynamic)"
+		}
+
+		fmt.Printf("%-20s | %-15s | %s\n",
+			cluster.Name,
+			cw,
+			cluster.LbPolicy.String(),
+		)
 	}
+	fmt.Println("-------------------------------------------------------------")
+}
+
+// --- HELPER: Generate a Sample Snapshot ---
+
+func generateSnapshot(version string) cache.Snapshot {
+	// 1. Create a Cluster (Upstream)
+	cls := &clusterv3.Cluster{
+		Name:                 "example_backend",
+		ConnectTimeout:       nil, // Use default
+		ClusterDiscoveryType: &clusterv3.Cluster_Type{Type: clusterv3.Cluster_STATIC},
+		LbPolicy:             clusterv3.Cluster_ROUND_ROBIN,
+		LoadAssignment: &endpointv3.ClusterLoadAssignment{
+			ClusterName: "example_backend",
+			Endpoints: []*endpointv3.LocalityLbEndpoints{{
+				LbEndpoints: []*endpointv3.LbEndpoint{{
+					HostIdentifier: &endpointv3.LbEndpoint_Endpoint{
+						Endpoint: &endpointv3.Endpoint{
+							Address: &corev3.Address{
+								Address: &corev3.Address_SocketAddress{
+									SocketAddress: &corev3.SocketAddress{
+										Address: "8.8.8.8", // Example: Google DNS
+										PortSpecifier: &corev3.SocketAddress_PortValue{
+											PortValue: 53,
+										},
+									},
+								},
+							},
+						},
+					},
+				}},
+			}},
+		},
+	}
+
+	// 2. Create a Listener (Downstream - what Envoy listens on)
+	// This will make Envoy open port 10000 on the container
+	hcmConfig := &hcm.HttpConnectionManager{
+		StatPrefix: "ingress_http",
+		RouteSpecifier: &hcm.HttpConnectionManager_RouteConfig{
+			RouteConfig: &routev3.RouteConfiguration{
+				Name: "local_route",
+				VirtualHosts: []*routev3.VirtualHost{{
+					Name:    "local_service",
+					Domains: []string{"*"},
+					Routes: []*routev3.Route{{
+						Match: &routev3.RouteMatch{
+							PathSpecifier: &routev3.RouteMatch_Prefix{Prefix: "/"},
+						},
+						Action: &routev3.Route_Route{
+							Route: &routev3.RouteAction{
+								ClusterSpecifier: &routev3.RouteAction_Cluster{
+									Cluster: "example_backend",
+								},
+							},
+						},
+					}},
+				}},
+			},
+		},
+		HttpFilters: []*hcm.HttpFilter{
+			{Name: wellknown.Router},
+		},
+	}
+	anyHCM, _ := anypb.New(hcmConfig)
+
+	lis := &listenerv3.Listener{
+		Name: "listener_0",
+		Address: &corev3.Address{
+			Address: &corev3.Address_SocketAddress{
+				SocketAddress: &corev3.SocketAddress{
+					Address:       "0.0.0.0",
+					PortSpecifier: &corev3.SocketAddress_PortValue{PortValue: 10000},
+				},
+			},
+		},
+		FilterChains: []*listenerv3.FilterChain{{
+			Filters: []*listenerv3.Filter{{
+				Name: wellknown.HTTPConnectionManager,
+				ConfigType: &listenerv3.Filter_TypedConfig{
+					TypedConfig: anyHCM,
+				},
+			}},
+		}},
+	}
+
+	// 3. Construct the Snapshot
+	snap, _ := cache.NewSnapshot(version, map[resource.Type][]types.Resource{
+		resource.ClusterType:  {cls},
+		resource.ListenerType: {lis},
+	})
+	return *snap
 }
