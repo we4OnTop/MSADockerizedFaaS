@@ -63,17 +63,8 @@ func main() {
 		log.Fatalf("Failed to listen on %s: %v", GrpcPort, err)
 	}
 
-	// 5. Create initial snapshot
-	snap, err := generateSnapshot("v1")
-	if err != nil {
-		log.Fatalf("Error generating snapshot: %v", err)
-	}
-	if err := snapshotCache.SetSnapshot(ctx, NodeID, snap); err != nil {
-		log.Fatalf("Error setting snapshot: %v", err)
-	}
-
 	// 6. Start Gin REST API for management
-	go startGinServer(snapshotCache)
+	go startGinServer(snapshotCache, ctx)
 
 	// 7. Start snapshot inspector in background
 	go func() {
@@ -93,8 +84,11 @@ func main() {
 }
 
 // Gin REST Server
-func startGinServer(snapshotCache cache.SnapshotCache) {
+func startGinServer(snapshotCache cache.SnapshotCache, ctx context.Context) {
 	r := gin.Default()
+
+	setupClusterRoutes(r, snapshotCache, ctx)
+	setupListenerRoutes(r, snapshotCache, ctx)
 
 	r.GET("/snapshot", func(c *gin.Context) {
 		snap, err := snapshotCache.GetSnapshot(NodeID)
@@ -122,18 +116,178 @@ func startGinServer(snapshotCache cache.SnapshotCache) {
 		c.JSON(http.StatusOK, gin.H{"status": "snapshot updated", "version": version})
 	})
 
-	r.POST("/cluster", func(c *gin.Context) {
-		cluster := createCluster("")
-		CURRENT_CLUSTERS = append(CURRENT_CLUSTERS, cluster)
-		if checkIfClusterNameUnique("Name") {
-			//BUILD ALL ON SAVED LOCAL -> EASY
-		}
-	})
-
 	log.Printf("🚀 REST API running on http://localhost:%s", RestPort)
 	if err := r.Run(":" + RestPort); err != nil {
 		log.Fatalf("Failed to start REST server: %v", err)
 	}
+}
+
+type ClusterInput struct {
+	Name           string  `json:"name" binding:"required"`
+	BaseRoutes     []Route `json:"base-routes"`
+	FallbackRoutes []Route `json:"fallback-routes"`
+}
+type ClusterRemove struct {
+	Name string `json:"name" binding:"required"`
+}
+
+type ClusterReplace struct {
+	ClusterInput
+	Replace bool `json:"replace"`
+}
+
+func setupClusterRoutes(r *gin.Engine, snapshotCache cache.SnapshotCache, ctx context.Context) {
+	r.POST("/cluster", func(c *gin.Context) {
+		var input ClusterInput
+
+		if err := c.ShouldBindJSON(&input); err != nil {
+			c.JSON(400, gin.H{"error": err.Error()})
+			return
+		}
+
+		var baseRoutes []Route = input.BaseRoutes
+		var fallbackRoutes []Route = input.FallbackRoutes
+
+		if !checkIfClusterNameUnique(input.Name) {
+			//BUILD ALL ON SAVED LOCAL -> EASY
+			newCluster := createCluster(input.Name)
+			if len(baseRoutes) > 0 || len(fallbackRoutes) > 0 {
+				appendRoutesToCluster(newCluster, baseRoutes, fallbackRoutes)
+			}
+			appendNewCluster(newCluster)
+			snapshot, err := updateSnapshot(snapshotCache, ctx)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			c.JSON(http.StatusOK, gin.H{"status": "snapshot updated", "version": snapshot})
+			return
+		} else {
+			c.JSON(http.StatusConflict, "Name already exists")
+		}
+
+	})
+	r.GET("/cluster", func(c *gin.Context) {
+		// Convert clusters to a JSON-friendly format if needed
+		clusters := make([]map[string]interface{}, len(CurrentClusters))
+		for i, cl := range CurrentClusters {
+			clusters[i] = map[string]interface{}{
+				"name": cl.Name,
+				"type": cl.GetType().String(),
+				// Add more fields if needed
+			}
+		}
+
+		c.JSON(200, gin.H{
+			"clusters": clusters,
+			"count":    len(clusters),
+		})
+	})
+	r.DELETE("/cluster", func(c *gin.Context) {
+		var input ClusterRemove
+		if err := c.ShouldBindJSON(&input); err != nil {
+			c.JSON(400, gin.H{"error": err.Error()})
+			return
+		}
+		if checkIfClusterNameUnique(input.Name) {
+			removeCluster(input.Name)
+			snapshot, err := updateSnapshot(snapshotCache, ctx)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			c.JSON(http.StatusOK, gin.H{"status": "snapshot updated", "version": snapshot.GetVersion(NodeID)})
+			return
+		} else {
+			c.JSON(http.StatusConflict, "No cluster with name exists")
+		}
+	})
+	r.PUT("/cluster", func(c *gin.Context) {
+		var input ClusterReplace
+
+		if err := c.ShouldBindJSON(&input); err != nil {
+			c.JSON(400, gin.H{"error": err.Error()})
+			return
+		}
+
+		var baseRoutes []Route = input.BaseRoutes
+		var fallbackRoutes []Route = input.FallbackRoutes
+		var foundCluster *clusterv3.Cluster
+		for _, cluster := range CurrentClusters {
+			if cluster.Name == input.Name {
+				foundCluster = cluster
+				break
+			}
+		}
+
+		if foundCluster != nil {
+			removeCluster(foundCluster.Name)
+			if input.Replace && (len(baseRoutes) > 0 || len(fallbackRoutes) > 0) {
+				replaceRoutesOnCluster(foundCluster, baseRoutes, fallbackRoutes)
+			} else {
+				appendRoutesToCluster(foundCluster, baseRoutes, fallbackRoutes)
+			}
+
+			appendNewCluster(foundCluster)
+			snapshot, err := updateSnapshot(snapshotCache, ctx)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			c.JSON(http.StatusOK, gin.H{"status": "snapshot updated", "version": snapshot})
+			return
+		} else {
+			c.JSON(http.StatusConflict, "Cluster not found")
+		}
+	})
+}
+
+type ListenerAddClusterInput struct {
+	Route        ListenerRoute `json:"route" binding:"required"`
+	ListenerName string        `json:"listener_name" binding:"required"`
+}
+
+func setupListenerRoutes(r *gin.Engine, snapshotCache cache.SnapshotCache, ctx context.Context) {
+	r.POST("/listener", func(c *gin.Context) {
+		var input Config
+
+		if err := c.ShouldBindJSON(&input); err != nil {
+			c.JSON(400, gin.H{"error": err.Error()})
+			return
+		}
+		CurrentListenerConfigurations = append(CurrentListenerConfigurations, &input)
+
+		CurrentListeners = []*listenerv3.Listener{}
+		for _, listenerConfiguration := range CurrentListenerConfigurations {
+			err := createListener(listenerConfiguration.Routes, listenerConfiguration.VirtualHosts, listenerConfiguration.ListenerConfiguration)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+		}
+		_, err := updateSnapshot(snapshotCache, ctx)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"status": "snapshot updated", "version": CurrentListeners})
+	})
+	r.PUT("/listener", func(c *gin.Context) {
+		var input ListenerAddClusterInput
+
+		if err := c.ShouldBindJSON(&input); err != nil {
+			c.JSON(400, gin.H{"error": err.Error()})
+			return
+		}
+		CurrentListeners = []*listenerv3.Listener{}
+		index := addClusterToListener(input.Route, input.ListenerName)
+		err := createListener(CurrentListenerConfigurations[index].Routes, CurrentListenerConfigurations[index].VirtualHosts, CurrentListenerConfigurations[index].ListenerConfiguration)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"status": "snapshot updated", "version": CurrentListeners})
+	})
 }
 
 // Fixed generateSnapshot (Returns error now)
