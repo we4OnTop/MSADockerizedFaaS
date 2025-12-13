@@ -1,5 +1,7 @@
-FROM envoyproxy/envoy:v1.30.1
+FROM envoyproxy/envoy:v1.36.2
 
-# 2. (Optional) Set the log level to verify startup
-# The base image already has an ENTRYPOINT that runs envoy
-CMD ["/usr/local/bin/envoy", "-c", "/etc/envoy/envoy.yaml", "--component-log-level", "upstream:debug,connection:trace"]
+COPY envoy.yaml /etc/envoy/envoy.yaml
+
+EXPOSE 9901 10000
+
+CMD ["/usr/local/bin/envoy", "-c", "/etc/envoy/envoy.yaml", "--service-cluster", "envoy"]
