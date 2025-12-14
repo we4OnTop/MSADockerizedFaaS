@@ -1,0 +1,35 @@
+services:
+  envoy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "9901:9901"   # Admin API
+      - "10000:10000" # Listener
+    volumes:
+      - ./envoy/envoy.yaml:/etc/envoy/envoy.yaml
+    extra_hosts:
+      - "control-plane:host-gateway"
+    restart: unless-stopped
+    networks:
+      - monitor-net
+
+    # Prometheus Server
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090" # Prometheus UI
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+    networks:
+      - monitor-net
+  backend:
+    image: python:3
+    ports:
+      - "8000:8000"
+    command: python -m http.server 8000
+    networks:
+      - monitor-net
+
+networks:
+  monitor-net:
