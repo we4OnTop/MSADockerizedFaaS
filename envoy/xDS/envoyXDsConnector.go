@@ -9,6 +9,7 @@ import (
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	routerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/router/v3"
 	hcm "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
+	httpv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/upstreams/http/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/resource/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
 	"google.golang.org/protobuf/types/known/anypb"
@@ -43,6 +44,31 @@ func checkIfClusterNameUnique(clusterName string) bool {
 	}
 	return false
 }
+
+var registeredDNSTypes = map[string]clusterv3.Cluster_DiscoveryType{
+	"strict": clusterv3.Cluster_STRICT_DNS,
+	"static": clusterv3.Cluster_STATIC,
+}
+
+func getDNSType(typeName string) clusterv3.Cluster_DiscoveryType {
+	if value, ok := registeredDNSTypes[typeName]; ok {
+		return value
+	}
+	return clusterv3.Cluster_STRICT_DNS
+}
+
+var registeredHTTPProtocol = map[string]*httpv3.HttpProtocolOptions_ExplicitHttpConfig{
+	"http1": basicHttp1Config(),
+	"http2": basicHttp2Config(),
+}
+
+func getHTTPProtocol(protocolName string) *httpv3.HttpProtocolOptions_ExplicitHttpConfig {
+	if value, ok := registeredHTTPProtocol[protocolName]; ok {
+		return value
+	}
+	return basicHttp2Config()
+}
+
 func toResources[T types.Resource](items []T) []types.Resource {
 	out := make([]types.Resource, len(items))
 	for i, item := range items {
@@ -71,12 +97,26 @@ func updateSnapshot(snapshotCache cache.SnapshotCache, ctx context.Context) (*ca
 	return snap, nil
 }
 
-func createCluster(clusterName string) *clusterv3.Cluster {
+func createCluster(clusterName string, discoveryType clusterv3.Cluster_DiscoveryType, coreHttpConfig *httpv3.HttpProtocolOptions_ExplicitHttpConfig) *clusterv3.Cluster {
+	httpProtocolOptions := &httpv3.HttpProtocolOptions{
+		UpstreamProtocolOptions: &httpv3.HttpProtocolOptions_ExplicitHttpConfig_{
+			ExplicitHttpConfig: coreHttpConfig,
+		},
+	}
+
+	// 2. Konvertiere die Konfiguration in einen anypb.Any Typ
+	pbst, err := anypb.New(httpProtocolOptions)
+	if err != nil {
+		// Fehlerbehandlung (panic oder return error, je nach Architektur)
+		panic(err)
+	}
+
+	// 3. Definiere den Cluster
 	cls := clusterv3.Cluster{
 		Name:                 clusterName,
 		ConnectTimeout:       durationpb.New(time.Second * 1),
-		ClusterDiscoveryType: &clusterv3.Cluster_Type{Type: clusterv3.Cluster_STATIC},
-		LbPolicy:             clusterv3.Cluster_LEAST_REQUEST,
+		ClusterDiscoveryType: &clusterv3.Cluster_Type{Type: discoveryType},
+		LbPolicy:             clusterv3.Cluster_ROUND_ROBIN,
 		LoadAssignment: &endpointv3.ClusterLoadAssignment{
 			ClusterName: clusterName,
 			Endpoints: []*endpointv3.LocalityLbEndpoints{{
@@ -86,13 +126,32 @@ func createCluster(clusterName string) *clusterv3.Cluster {
 		CircuitBreakers: &clusterv3.CircuitBreakers{
 			Thresholds: []*clusterv3.CircuitBreakers_Thresholds{{
 				Priority:           corev3.RoutingPriority_DEFAULT,
-				MaxConnections:     wrapperspb.UInt32(100), // threshold per host
+				MaxConnections:     wrapperspb.UInt32(100),
 				MaxPendingRequests: wrapperspb.UInt32(50),
 			}},
+		},
+		TypedExtensionProtocolOptions: map[string]*anypb.Any{
+			"envoy.extensions.upstreams.http.v3.HttpProtocolOptions": pbst,
 		},
 	}
 
 	return &cls
+}
+
+func basicHttp2Config() *httpv3.HttpProtocolOptions_ExplicitHttpConfig {
+	return &httpv3.HttpProtocolOptions_ExplicitHttpConfig{
+		ProtocolConfig: &httpv3.HttpProtocolOptions_ExplicitHttpConfig_Http2ProtocolOptions{
+			Http2ProtocolOptions: &corev3.Http2ProtocolOptions{},
+		},
+	}
+}
+
+func basicHttp1Config() *httpv3.HttpProtocolOptions_ExplicitHttpConfig {
+	return &httpv3.HttpProtocolOptions_ExplicitHttpConfig{
+		ProtocolConfig: &httpv3.HttpProtocolOptions_ExplicitHttpConfig_HttpProtocolOptions{
+			HttpProtocolOptions: &corev3.Http1ProtocolOptions{},
+		},
+	}
 }
 
 func appendNewCluster(newCluster *clusterv3.Cluster) {

@@ -42,31 +42,31 @@ const (
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 
-	// 1. Initialize Snapshot Cache
+	// Initialize Snapshot Cache
 	snapshotCache := cache.NewSnapshotCache(false, cache.IDHash{}, nil)
 
-	// 2. Initialize xDS Server
+	// Initialize xDS Server
 	ctx := context.Background()
 	srv := xds.NewServer(ctx, snapshotCache, nil)
 	grpcServer := grpc.NewServer()
 
-	// 3. Register Envoy xDS Services
+	// Register Envoy xDS Services
 	discoverygrpc.RegisterAggregatedDiscoveryServiceServer(grpcServer, srv)
 	endpointservice.RegisterEndpointDiscoveryServiceServer(grpcServer, srv)
 	clusterservice.RegisterClusterDiscoveryServiceServer(grpcServer, srv)
 	routeservice.RegisterRouteDiscoveryServiceServer(grpcServer, srv)
 	listenerservice.RegisterListenerDiscoveryServiceServer(grpcServer, srv)
 
-	// 4. Start gRPC Server
+	// Start gRPC Server
 	lis, err := net.Listen("tcp", GrpcPort)
 	if err != nil {
 		log.Fatalf("Failed to listen on %s: %v", GrpcPort, err)
 	}
 
-	// 6. Start Gin REST API for management
+	// Start Gin REST API for management
 	go startGinServer(snapshotCache, ctx)
 
-	// 7. Start snapshot inspector in background
+	// Start snapshot inspector in background
 	go func() {
 		for {
 			_, err := snapshotCache.GetSnapshot(NodeID)
@@ -124,6 +124,8 @@ func startGinServer(snapshotCache cache.SnapshotCache, ctx context.Context) {
 
 type ClusterInput struct {
 	Name           string  `json:"name" binding:"required"`
+	DnsType        string  `json:"dns-type"`
+	HTTPProtocol   string  `json:"http-protocol"`
 	BaseRoutes     []Route `json:"base-routes"`
 	FallbackRoutes []Route `json:"fallback-routes"`
 }
@@ -149,8 +151,7 @@ func setupClusterRoutes(r *gin.Engine, snapshotCache cache.SnapshotCache, ctx co
 		var fallbackRoutes []Route = input.FallbackRoutes
 
 		if !checkIfClusterNameUnique(input.Name) {
-			//BUILD ALL ON SAVED LOCAL -> EASY
-			newCluster := createCluster(input.Name)
+			newCluster := createCluster(input.Name, getDNSType(input.DnsType), getHTTPProtocol(input.HTTPProtocol))
 			if len(baseRoutes) > 0 || len(fallbackRoutes) > 0 {
 				appendRoutesToCluster(newCluster, baseRoutes, fallbackRoutes)
 			}

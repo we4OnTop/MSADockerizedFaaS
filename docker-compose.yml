@@ -1,4 +1,28 @@
 services:
+  # Prometheus Server
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090" # Prometheus UI
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.ym
+    depends_on:
+      - envoy
+      - cadvisor
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:latest
+    container_name: cadvisor
+    ports:
+      - "8080:8080"
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:rw
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    depends_on:
+      - envoy
+
   envoy:
     build:
       context: .
@@ -11,25 +35,12 @@ services:
     extra_hosts:
       - "control-plane:host-gateway"
     restart: unless-stopped
-    networks:
-      - monitor-net
 
-    # Prometheus Server
-  prometheus:
-    image: prom/prometheus:latest
-    ports:
-      - "9090:9090" # Prometheus UI
-    volumes:
-      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
-    networks:
-      - monitor-net
   backend:
     image: python:3
     ports:
       - "8000:8000"
     command: python -m http.server 8000
-    networks:
-      - monitor-net
 
 networks:
   monitor-net:
