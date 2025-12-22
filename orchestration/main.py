@@ -1,8 +1,8 @@
-from orchestrationManager import orchestrationManager
+from orchestrationManager import OrchestrationManager
+
 
 def main():
-    orchestrationManager()
-
+    OrchestrationManager()
 
 
 if __name__ == "__main__":
