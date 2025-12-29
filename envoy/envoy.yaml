@@ -1,6 +1,26 @@
 node:
   id: local_node
 
+stats_flush_interval: 0.1s
+
+stats_config:
+  stats_matcher:
+    inclusion_list:
+      patterns:
+        - safe_regex:
+            google_re2: {}
+            regex: "cluster\\..*\\.upstream_rq_pending_active"
+
+stats_sinks:
+  - name: envoy.stat_sinks.statsd
+    typed_config:
+      "@type": type.googleapis.com/envoy.config.metrics.v3.StatsdSink
+      address:
+        socket_address:
+          protocol: UDP
+          address: 127.0.0.1
+          port_value: 8125
+
 dynamic_resources:
   lds_config:
     api_config_source:
@@ -43,3 +63,4 @@ admin:
     socket_address:
       address: 0.0.0.0
       port_value: 9901
+

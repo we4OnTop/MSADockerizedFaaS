@@ -1,0 +1,11 @@
+groups:
+  - name: scaler.rules
+    rules:
+      - alert: HighLoadDetected
+        # Trigger if active requests are > 100 for more than 30 seconds
+        expr: envoy_cluster_upstream_rq_active{cluster="my_backend_service"} > 100
+        for: 30s
+        labels:
+          action: scale_up
+        annotations:
+          summary: "Backend is saturated"

@@ -1,4 +1,16 @@
 services:
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    ports:
+      - "16686:16686" # The UI
+      - "9411:9411"   # Zipkin Protocol Port (Envoy uses this)
+  gate:
+    image: openresty/openresty:alpine
+    volumes:
+      - ./nginx/nginx.conf:/usr/local/openresty/nginx/conf/nginx.conf:ro
+    ports:
+      - "8080:80" # Der Gate-Port für deinen Traffic
+
   # Prometheus Server
   prometheus:
     image: prom/prometheus:latest
@@ -44,3 +56,4 @@ services:
 
 networks:
   monitor-net:
+  proxy-net:

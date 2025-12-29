@@ -25,8 +25,8 @@ COPY --from=builder /usr/local /usr/local
 COPY faas-setup/ ./
 COPY functions/${APP_FILE}.py ./
 
-ARG HANDLER_DIR="."
-ARG HANDLER_NAME=${APP_FILE}
+ENV HANDLER_DIR="."
+ENV HANDLER_NAME=${APP_FILE}
 
 USER appuser
 

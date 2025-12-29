@@ -1,15 +1,19 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"time"
 
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	routerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/router/v3"
 	hcm "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	httpv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/upstreams/http/v3"
+	typev3 "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/resource/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
 	"google.golang.org/protobuf/types/known/anypb"
@@ -34,6 +38,8 @@ const (
 var CurrentClusters []*clusterv3.Cluster
 var CurrentListeners []*listenerv3.Listener
 var CurrentListenerConfigurations []*Config
+var ListenerUsingClusters = make(map[string][]string)
+var ClusterBlockList = []string{}
 var snapshotNumber int32 = 1
 
 func checkIfClusterNameUnique(clusterName string) bool {
@@ -114,7 +120,7 @@ func createCluster(clusterName string, discoveryType clusterv3.Cluster_Discovery
 	// 3. Definiere den Cluster
 	cls := clusterv3.Cluster{
 		Name:                 clusterName,
-		ConnectTimeout:       durationpb.New(time.Second * 1),
+		ConnectTimeout:       durationpb.New(time.Second * 2),
 		ClusterDiscoveryType: &clusterv3.Cluster_Type{Type: discoveryType},
 		LbPolicy:             clusterv3.Cluster_ROUND_ROBIN,
 		LoadAssignment: &endpointv3.ClusterLoadAssignment{
@@ -123,11 +129,17 @@ func createCluster(clusterName string, discoveryType clusterv3.Cluster_Discovery
 				LbEndpoints: []*endpointv3.LbEndpoint{},
 			}},
 		},
+		CommonLbConfig: &clusterv3.Cluster_CommonLbConfig{
+			HealthyPanicThreshold: &typev3.Percent{
+				Value: 0.0,
+			},
+		},
 		CircuitBreakers: &clusterv3.CircuitBreakers{
 			Thresholds: []*clusterv3.CircuitBreakers_Thresholds{{
 				Priority:           corev3.RoutingPriority_DEFAULT,
-				MaxConnections:     wrapperspb.UInt32(100),
-				MaxPendingRequests: wrapperspb.UInt32(50),
+				MaxConnections:     wrapperspb.UInt32(10),
+				MaxRequests:        wrapperspb.UInt32(10),
+				MaxPendingRequests: wrapperspb.UInt32(50000),
 			}},
 		},
 		TypedExtensionProtocolOptions: map[string]*anypb.Any{
@@ -166,6 +178,7 @@ func removeCluster(clusterName string) {
 		}
 	}
 	CurrentClusters = newClusters
+
 }
 
 type Route struct {
@@ -204,6 +217,12 @@ func replaceRoutesOnCluster(cls *clusterv3.Cluster, baseRoutes []Route, fallback
 
 	// Add fallback routes
 	addEndpoints(fallbackPriority, fallbackRoutes)
+
+	routesThere := len(baseRoutes) > 0 && len(fallbackRoutes) > 0
+	err := updateBlockList(cls.Name, routesThere)
+	if err != nil {
+		return
+	}
 }
 
 func appendRoutesToCluster(cls *clusterv3.Cluster, baseRoutes []Route, fallbackRoutes []Route) {
@@ -238,6 +257,7 @@ func appendRoutesToCluster(cls *clusterv3.Cluster, baseRoutes []Route, fallbackR
 		for _, item := range routes {
 			locality.LbEndpoints = append(locality.LbEndpoints, createHost(item.Address, item.Port))
 		}
+
 	}
 
 	// Add base routes
@@ -246,6 +266,11 @@ func appendRoutesToCluster(cls *clusterv3.Cluster, baseRoutes []Route, fallbackR
 	// Add fallback routes
 	addEndpoints(fallbackPriority, fallbackRoutes)
 
+	routesThere := len(baseRoutes) > 0 && len(fallbackRoutes) > 0
+	err := updateBlockList(cls.Name, routesThere)
+	if err != nil {
+		return
+	}
 	println(cls)
 }
 
@@ -265,6 +290,7 @@ func createHost(addr string, port uint32) *endpointv3.LbEndpoint {
 				},
 			},
 		},
+		//HealthStatus: corev3.HealthStatus(corev3.HealthStatus_UNHEALTHY),
 	}
 }
 
@@ -319,8 +345,8 @@ func createListener(
 		return fmt.Errorf("failed to create router config: %v", err)
 	}
 
-	// HTTP Connection Manager
 	hcmConfig := &hcm.HttpConnectionManager{
+
 		StatPrefix: listenerConfiguration.ListenerName,
 		RouteSpecifier: &hcm.HttpConnectionManager_RouteConfig{
 			RouteConfig: &routev3.RouteConfiguration{
@@ -363,6 +389,14 @@ func createListener(
 	}
 
 	CurrentListeners = append(CurrentListeners, lis)
+
+	for _, route := range routes {
+		ListenerUsingClusters[route.Prefix] = []string{
+			route.ClusterToUse}
+	}
+
+	updateFullClusterBlock()
+
 	return nil
 }
 
@@ -424,4 +458,96 @@ func createRouteComponent(prefix string, routeToCluster string) *routev3.Route {
 		},
 	}
 	return route
+}
+
+func pushClusterBlockList() error {
+	payload := struct {
+		Blocked []string `json:"blocked"`
+	}{
+		Blocked: ClusterBlockList,
+	}
+
+	jsonData, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal JSON: %v", err)
+	}
+	println("JSON Data: ", string(jsonData))
+	resp, err := http.Post("http://localhost:8080/admin/config", "application/json",
+		bytes.NewBuffer(jsonData))
+	if err != nil {
+		return fmt.Errorf("failed to make request to nginx: %v", err)
+	}
+	defer resp.Body.Close() // Always close response body
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("bad status: %s", resp.Status)
+	}
+	return nil
+}
+
+func getKeysForValue(data map[string][]string, target string) []string {
+	var matchingKeys []string
+
+	for key, list := range data {
+		for _, item := range list {
+			if item == target {
+				matchingKeys = append(matchingKeys, key)
+				break
+			}
+		}
+	}
+	return matchingKeys
+}
+
+func removeString(list []string, target string) []string {
+	for i, item := range list {
+		if item == target {
+			return append(list[:i], list[i+1:]...)
+		}
+	}
+	return list
+}
+
+func updateBlockList(clusterName string, routesThere bool) error {
+	keys := getKeysForValue(ListenerUsingClusters, clusterName)
+	for _, key := range keys {
+		println("keys: ", key)
+	}
+	if len(keys) > 0 {
+		if !routesThere {
+			ClusterBlockList = append(ClusterBlockList, keys...)
+		} else if len(ClusterBlockList) > 0 {
+			for _, key := range keys {
+				removeString(ClusterBlockList, key)
+			}
+		}
+	}
+	println("Update Block List: ", ClusterBlockList)
+	println(clusterName)
+	println(routesThere)
+	return pushClusterBlockList()
+}
+
+/*
+	locality = &endpointv3.LocalityLbEndpoints{
+					Priority:    priority,
+					LbEndpoints: []*endpointv3.LbEndpoint{},
+				}
+				cls.LoadAssignment.Endpoints = append(cls.LoadAssignment.Endpoints, locality)
+				existingPriorities[priority] = locality
+*/
+func updateFullClusterBlock() {
+	for _, cluster := range CurrentClusters {
+		clusterName := cluster.Name
+		anyRoutes := false
+		for _, endpoint := range cluster.LoadAssignment.Endpoints {
+			if endpoint.LbEndpoints != nil && len(endpoint.LbEndpoints) > 0 {
+				anyRoutes = true
+			}
+		}
+		err := updateBlockList(clusterName, anyRoutes)
+		if err != nil {
+			return
+		}
+	}
 }
