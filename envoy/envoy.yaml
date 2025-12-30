@@ -54,7 +54,7 @@ static_resources:
               - endpoint:
                   address:
                     socket_address:
-                      address: control-plane  # Matches extra_hosts in Docker Compose
+                      address: xds_connector  # Matches extra_hosts in Docker Compose
                       port_value: 50051       # Matches your Go server
 
 admin:

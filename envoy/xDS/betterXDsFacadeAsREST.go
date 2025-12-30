@@ -6,6 +6,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"time"
 
 	routerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/router/v3"
@@ -33,13 +34,11 @@ import (
 	hcm "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 )
 
-const (
-	GrpcPort = "0.0.0.0:50051"
-	NodeID   = "local_node"
-	RestPort = "8081"
-)
-
 func main() {
+	GrpcAddressEnv := os.Getenv("GRPC_ADDRESS")
+	NodeIDEnv := os.Getenv("NODE_ID")
+	RestPortEnv := os.Getenv("REST_PORT")
+
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 
 	// Initialize Snapshot Cache
@@ -58,40 +57,40 @@ func main() {
 	listenerservice.RegisterListenerDiscoveryServiceServer(grpcServer, srv)
 
 	// Start gRPC Server
-	lis, err := net.Listen("tcp", GrpcPort)
+	lis, err := net.Listen("tcp", GrpcAddressEnv)
 	if err != nil {
-		log.Fatalf("Failed to listen on %s: %v", GrpcPort, err)
+		log.Fatalf("Failed to listen on %s: %v", GrpcAddressEnv, err)
 	}
 
 	// Start Gin REST API for management
-	go startGinServer(snapshotCache, ctx)
+	go startGinServer(snapshotCache, ctx, NodeIDEnv, RestPortEnv)
 
 	// Start snapshot inspector in background
 	go func() {
 		for {
-			_, err := snapshotCache.GetSnapshot(NodeID)
+			_, err := snapshotCache.GetSnapshot(NodeIDEnv)
 			if err != nil {
-				log.Printf("Inspector: Node '%s' has no snapshot yet.", NodeID)
+				log.Printf("Inspector: Node '%s' has no snapshot yet.", NodeIDEnv)
 			}
 			time.Sleep(5 * time.Second)
 		}
 	}()
 
-	log.Printf("🚀 Envoy Control Plane running on gRPC %s", GrpcPort)
+	log.Printf("🚀 Envoy Control Plane running on gRPC %s", GrpcAddressEnv)
 	if err := grpcServer.Serve(lis); err != nil {
 		log.Fatalf("gRPC server exited: %v", err)
 	}
 }
 
 // Gin REST Server
-func startGinServer(snapshotCache cache.SnapshotCache, ctx context.Context) {
+func startGinServer(snapshotCache cache.SnapshotCache, ctx context.Context, NodeIDEnv string, RestPortEnv string) {
 	r := gin.Default()
 
-	setupClusterRoutes(r, snapshotCache, ctx)
+	setupClusterRoutes(r, snapshotCache, ctx, NodeIDEnv)
 	setupListenerRoutes(r, snapshotCache, ctx)
 
 	r.GET("/snapshot", func(c *gin.Context) {
-		snap, err := snapshotCache.GetSnapshot(NodeID)
+		snap, err := snapshotCache.GetSnapshot(NodeIDEnv)
 		if err != nil {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Snapshot not found"})
 			return
@@ -109,15 +108,15 @@ func startGinServer(snapshotCache cache.SnapshotCache, ctx context.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
-		if err := snapshotCache.SetSnapshot(context.Background(), NodeID, snap); err != nil {
+		if err := snapshotCache.SetSnapshot(context.Background(), NodeIDEnv, snap); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"status": "snapshot updated", "version": version})
 	})
 
-	log.Printf("🚀 REST API running on http://localhost:%s", RestPort)
-	if err := r.Run(":" + RestPort); err != nil {
+	log.Printf("🚀 REST API running on http://localhost:%s", RestPortEnv)
+	if err := r.Run(":" + RestPortEnv); err != nil {
 		log.Fatalf("Failed to start REST server: %v", err)
 	}
 }
@@ -138,7 +137,7 @@ type ClusterReplace struct {
 	Replace bool `json:"replace"`
 }
 
-func setupClusterRoutes(r *gin.Engine, snapshotCache cache.SnapshotCache, ctx context.Context) {
+func setupClusterRoutes(r *gin.Engine, snapshotCache cache.SnapshotCache, ctx context.Context, NodeIDEnv string) {
 	r.POST("/cluster", func(c *gin.Context) {
 		var input ClusterInput
 
@@ -197,7 +196,7 @@ func setupClusterRoutes(r *gin.Engine, snapshotCache cache.SnapshotCache, ctx co
 				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 				return
 			}
-			c.JSON(http.StatusOK, gin.H{"status": "snapshot updated", "version": snapshot.GetVersion(NodeID)})
+			c.JSON(http.StatusOK, gin.H{"status": "snapshot updated", "version": snapshot.GetVersion(NodeIDEnv)})
 			return
 		} else {
 			c.JSON(http.StatusConflict, "No cluster with name exists")

@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"strings"
 	"time"
 
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
@@ -96,7 +98,9 @@ func updateSnapshot(snapshotCache cache.SnapshotCache, ctx context.Context) (*ca
 		return nil, fmt.Errorf("failed to create snapshot: %v", err)
 	}
 
-	if err := snapshotCache.SetSnapshot(ctx, NodeID, snap); err != nil {
+	NodeIDEnv := os.Getenv("NODE_ID")
+
+	if err := snapshotCache.SetSnapshot(ctx, NodeIDEnv, snap); err != nil {
 		return nil, fmt.Errorf("failed to set snapshot: %v", err)
 	}
 	snapshotNumber = snapshotNumber + 1
@@ -472,7 +476,7 @@ func pushClusterBlockList() error {
 		return fmt.Errorf("failed to marshal JSON: %v", err)
 	}
 	println("JSON Data: ", string(jsonData))
-	resp, err := http.Post("http://localhost:8080/admin/config", "application/json",
+	resp, err := http.Post("http://gate:99/admin/config", "application/json",
 		bytes.NewBuffer(jsonData))
 	if err != nil {
 		return fmt.Errorf("failed to make request to nginx: %v", err)
@@ -501,6 +505,8 @@ func getKeysForValue(data map[string][]string, target string) []string {
 
 func removeString(list []string, target string) []string {
 	for i, item := range list {
+		println("REMOVE")
+		println(item, "  ", target)
 		if item == target {
 			return append(list[:i], list[i+1:]...)
 		}
@@ -518,13 +524,17 @@ func updateBlockList(clusterName string, routesThere bool) error {
 			ClusterBlockList = append(ClusterBlockList, keys...)
 		} else if len(ClusterBlockList) > 0 {
 			for _, key := range keys {
-				removeString(ClusterBlockList, key)
+				print(key)
+				ClusterBlockList = removeString(ClusterBlockList, key)
 			}
 		}
 	}
 	println("Update Block List: ", ClusterBlockList)
 	println(clusterName)
 	println(routesThere)
+	formattedList := strings.Join(ClusterBlockList, ", ")
+	fmt.Println("\n--- Comma Separated ---")
+	fmt.Println(formattedList)
 	return pushClusterBlockList()
 }
 
