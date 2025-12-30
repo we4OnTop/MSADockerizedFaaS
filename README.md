@@ -1,14 +1,7 @@
 # MSADockerizedFaaS
 
-## Base Application
-Frontend: React (+ Astro)
-Backend: Spring Boot oder Express => da muss mach noch schauen wegen FaaS
+In our PVL Project we implemented an approach to create and orchestrate functions in an docker container as Functions-as-a-Service. To enable that we used different technolgies to create and remove containers, route to the specific containers and orchestrate everything together.
 
--> nodejs
+## Architectual Model
 
-(Database: MySQL oder MongoDB)
 
-## FaaS System
-Docker 
-Nginx als Load Balancer
-Deployer in Python
