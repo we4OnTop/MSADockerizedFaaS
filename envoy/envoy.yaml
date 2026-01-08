@@ -1,16 +1,7 @@
 node:
   id: local_node
 
-stats_flush_interval: 0.1s
-
-stats_config:
-  stats_matcher:
-    inclusion_list:
-      patterns:
-        - safe_regex:
-            google_re2: {}
-            regex: "cluster\\..*\\.upstream_rq_pending_active"
-
+stats_flush_interval: 20.5s  # Push every 500ms
 stats_sinks:
   - name: envoy.stat_sinks.statsd
     typed_config:
@@ -18,8 +9,9 @@ stats_sinks:
       address:
         socket_address:
           protocol: UDP
-          address: 127.0.0.1
+          address: 127.0.0.1 # Matches docker-compose service name
           port_value: 8125
+      prefix: "envoy"
 
 dynamic_resources:
   lds_config:
@@ -56,6 +48,22 @@ static_resources:
                     socket_address:
                       address: xds_connector  # Matches extra_hosts in Docker Compose
                       port_value: 50051       # Matches your Go server
+
+    - name: jaeger
+      connect_timeout: 1s
+      type: STRICT_DNS
+
+      dns_lookup_family: V4_ONLY
+
+      load_assignment:
+        cluster_name: jaeger
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address:
+                      address: jaeger
+                      port_value: 9411
 
 admin:
   access_log_path: /tmp/admin_access.log

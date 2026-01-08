@@ -1,9 +1,14 @@
 services:
-#  jaeger:
-#    image: jaegertracing/all-in-one:latest
-#    ports:
-#      - "16686:16686" # The UI
-#      - "9411:9411"   # Zipkin Protocol Port (Envoy uses this)
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    environment:
+      # 1. ADD THIS to enable Port 9411
+      - COLLECTOR_ZIPKIN_HOST_PORT=:9411
+    ports:
+      - "16686:16686" # The UI
+      - "9411:9411"   # Zipkin Protocol Port (Envoy uses this)
+    networks:
+      - monitor-net
   xds_connector:
     build:
       context: .
@@ -16,25 +21,27 @@ services:
       - REST_PORT=8081
     networks:
       - proxy-net
+      - layers-messaging-net
     depends_on:
       - gate
       - envoy
 
   gate:
-    image: openresty/openresty:alpine
-    volumes:
-      - ./nginx/nginx.conf:/usr/local/openresty/nginx/conf/nginx.conf:ro
+    build:
+      context: .
+      dockerfile: ./nginx/Dockerfile
     ports:
-      - "8080:80" # Der Gate-Port für deinen Traffic
+      - "8080:80"
+    environment:
+      - REST_PORT=7071
     networks:
       - proxy-net
       - layers-messaging-net
 
-  # Prometheus Server
   prometheus:
     image: prom/prometheus:latest
     ports:
-      - "9090:9090" # Prometheus UI
+      - "9090:9090"
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.ym
     depends_on:
@@ -63,12 +70,39 @@ services:
       #- "10000:10000" # Listener
     volumes:
       - ./envoy/envoy.yaml:/etc/envoy/envoy.yaml
+      - shared-logs:/shared/logs
     extra_hosts:
       - "control-plane:host-gateway"
     restart: unless-stopped
     networks:
       - proxy-net
       - faas-net
+      - monitor-net
+    environment:
+      - REDIS_ADDR=redis-messanger:6379
+      - TRACKER_FAAS_REDIS_TOPIC=FAASTracker
+    depends_on:
+      - redis
+      - jaeger
+
+  python-watcher:
+    build:
+      context: ./testwatcher/
+      dockerfile: Dockerfile
+    volumes:
+      - shared-logs:/shared/logs
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - proxy-net
+
+  statsd-listener:
+    build:
+      context: ./statsdListener/
+      dockerfile: Dockerfile
+    environment:
+      - WEBHOOK_URL=http://webhook:5000/alert
+    network_mode: service:envoy
+
 
   backend:
     image: python:3
@@ -78,20 +112,31 @@ services:
     networks:
       - faas-net
 
-  mosquitto:
-    image: eclipse-mosquitto:2.0.22
-    container_name: mosquitto
-    restart: unless-stopped
+  redis:
+    image: redis:alpine
+    container_name: redis-messanger
     ports:
-      - "1883:1883"    # MQTT
-      - "8883:8883"    # MQTTS (secure)
-      - "9001:9001"    # WebSockets
-    volumes:
-      - ./mosquitto/config:/mosquitto/config
-      - ./mosquitto/data:/mosquitto/data
-      - ./mosquitto/log:/mosquitto/log
+      - "6379:6379"
+    command: ["redis-server", "--notify-keyspace-events", "Ex"]
     networks:
       - layers-messaging-net
+
+  redis-rest-pusher:
+    build:
+      context: .
+      dockerfile: ./mqttEasierPublishREST/Dockerfile
+    ports:
+      - "7071:7071"
+    environment:
+      - REDIS_ADDR=redis-messanger:6379
+      - REST_PORT=7071
+      - ADD_FAAS_REDIS_TOPIC=newFAASCounter
+      - REMOVE_FAAS_REDIS_TOPIC=removingFAASCounter
+    networks:
+      - layers-messaging-net
+
+volumes:
+  shared-logs:
 
 networks:
   monitor-net:

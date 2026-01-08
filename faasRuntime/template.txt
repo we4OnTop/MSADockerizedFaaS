@@ -1,0 +1,3 @@
+async def handle(request):
+    data = await request.json() if request.method == "POST" else {}
+    return {}

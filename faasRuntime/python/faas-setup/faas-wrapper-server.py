@@ -6,10 +6,11 @@ from starlette.requests import Request
 from starlette.routing import Route
 
 def load_handler():
-    HANDLER_DIR = os.environ['HANDLERS_DIR']
+    print("NEW REQUEST!!!!")
+    HANDLER_DIR = os.environ['HANDLER_DIR']
     HANDLER_NAME = os.environ['HANDLER_NAME']
     spec = importlib.util.spec_from_file_location(
-        HANDLER_NAME, os.path.join(HANDLER_DIR, f"{HANDLER_NAME}.py")
+        HANDLER_NAME, os.path.join(HANDLER_DIR, f"{HANDLER_NAME}")
     )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -23,7 +24,7 @@ async def invoke_function(request: Request):
         result = await BASE_HANDLER_FUNCTION(request)
         return JSONResponse(result)
     except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
+        return JSONResponse({"Internal error while executing function, try again later..."}, status_code=500)
 
 routes = [
     Route("/", endpoint=invoke_function),

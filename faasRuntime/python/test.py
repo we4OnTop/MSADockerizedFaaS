@@ -1,21 +1,22 @@
 import socket
 import subprocess
 
-BIND_IP = "127.0.0.1"
-BIND_PORT = 8125
+UDP_IP = "0.0.0.0"
+UDP_PORT = 8125
 THRESHOLD = 1
 
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-sock.bind((BIND_IP, BIND_PORT))
+sock.bind((UDP_IP, UDP_PORT))
 
 print("👀 Watching ALL clusters for pending requests...")
 
 while True:
+    print("MESSAGE: ")
     data, _ = sock.recvfrom(128)
     message = data.decode('utf-8')
 
     # Message looks like: "cluster.backend_api.upstream_rq_pending_active:5|g"
-
+    print("MESSAGE: " + message)
     if "pending_active" in message:
         try:
             # 1. Parse the Value (the number of pending requests)

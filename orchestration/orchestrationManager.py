@@ -1,37 +1,296 @@
+import os
+import threading
+import uuid
+from concurrent.futures.thread import ThreadPoolExecutor
+from pathlib import Path
+
 import docker
-from datetime import datetime
+
+import requests
+import yaml
 
 
 class OrchestrationManager:
     def __init__(self):
+        faas_config_yaml_path = os.environ["FAAS_CONFIG_YAML_PATH"] = "./../faasRuntime/global-function-definition.yml"
+        self.faas_root_folder_path = os.environ["FAAS_ROOT_FOLDER_PATH"] = "./../faasRuntime"
+        self.BASE_FAAS_PORT = os.environ["BASE_FAAS_PORT"] = "5000"
+        self.ENVOY_XDS_ADDRESS = os.environ["ENVOY_XDS_ADDRESS"] = "localhost:8081"
         self.client = docker.from_env()
+
+        self.active_containers_dict = {}
+
+        with open(faas_config_yaml_path, "r") as f:
+            try:
+                self.CONFIGURATION_FAAS_YAML = yaml.safe_load(f)
+                print("YAML syntax is valid.")
+            except yaml.YAMLError as exc:
+                print(f"Syntax error in YAML file: {exc}")
         """        
         self.image = self.build_image(".", "Dockerfile", "tag")
         self.container_id = self.start_container(self.image)
         print(self.check_container_status(self.container_id))
         """
 
-    def build_image(self, context_path: str, dockerfile: str, tag: str) -> str:
-        image, _ = self.client.images.build(
+    def check_image_integrity(self):
+        current_images = []
+        working_images = {}
+        deprecated_images = []
+        functions_dict = {}
+
+        futures = []
+
+        for func_id, func_data in self.CONFIGURATION_FAAS_YAML["usable-functions"].items():
+            func_name = func_data.get("name") or func_id
+            version = func_data["version"]
+            current_images.append(f"{func_name}:{version}")
+
+            key = func_data.get("name") or func_id
+            functions_dict[key] = func_data
+
+        images = self.client.images.list()
+
+        existing_tags = [tag for image in images for tag in image.tags]
+        existing_tags_without_version = [tag.split(":")[0] for tag in existing_tags]
+
+        for image_name in current_images:
+            print(f"Current Image: {image_name}")
+            print(f"Existing Image: {existing_tags}")
+            if image_name in existing_tags:
+                working_images[f"{image_name.split(":")[0]}"] = image_name
+            elif image_name.split(":")[0] in existing_tags_without_version:
+                deprecated_images.append(image_name)
+
+        if len(deprecated_images) > 0:
+            self.clear_deprecated_images(deprecated_images)
+
+        not_found_images = [img for img in current_images if img not in working_images.values()]
+
+        built_images = {}
+
+        missing_image_executor = ThreadPoolExecutor(max_workers=5)
+        for image_name in not_found_images:
+            print(f"Rebuilding Image: {image_name}")
+            split_image_name = image_name.split(":")
+            configuration_data = functions_dict.get(split_image_name[0])["configuration"]
+
+            arg_payload = {
+            "EXTRA_DEPS": configuration_data["extra_dependencies"],
+            "APP_FILE": configuration_data["base_function_file_name"],
+            "FUNCTION_DATA_DIR": f"{configuration_data["function_folder"]}",
+            }
+
+            for item in Path.cwd().iterdir():
+                print(item)
+
+            futures.append(
+                missing_image_executor.submit(
+                    self.build_image,
+                    context_path=f"{self.faas_root_folder_path}/{configuration_data["programing_language"]}",
+                    dockerfile=f"Dockerfile",
+                    function_name=split_image_name[0],
+                    version=split_image_name[1],
+                    buildargs=arg_payload,
+                )
+            )
+            built_images[split_image_name[0]] = image_name
+
+        for future in futures:
+            future.result()
+        missing_image_executor.shutdown(wait=True)
+
+        image_dict = working_images | built_images
+        print(f"Images: {image_dict}")
+        return image_dict
+
+
+    def build_image(self, context_path: str, dockerfile: str, function_name: str, version: str, buildargs: dict[str, str]):
+        image, logs = self.client.images.build(
             path=context_path,
             dockerfile=dockerfile,
-            # tag=tag,
+            tag=f"{function_name}:{version}",
+            buildargs=buildargs,
+            nocache = True
         )
-        return image.tags[0] if image.tags else image.id
+        print(f"Built image: {image}")
 
-    def start_container(self, image_ref: str, **run_kwargs) -> str:
-        container = self.client.containers.run(
-            image_ref,
-            ports={"5000/tcp": 0},
-            detach=True,
-            **run_kwargs,
+    def _log_watcher_thread(self, container_name, faas_name, ready_signal):
+        """
+        Überwacht die Konsole des Containers auf ein spezifisches Signal.
+        """
+        print(f"🔍 [Log-Watcher] Suche in {container_name} nach: '{ready_signal}'")
+        try:
+            container = self.client.containers.get(container_name)
+            # stream=True hält die Verbindung offen und liest jede neue Zeile
+            log_stream = container.logs(stream=True, follow=True)
+
+            for line in log_stream:
+                print(f"✨ [Log-Watcher]")
+                print(line)
+                if ready_signal in line.decode('utf-8'):
+                    print(f"✨ [Log-Watcher] Signal '{ready_signal}' gefunden!")
+                    self.append_updated_faas_containers(faas_name)
+                    break
+        except Exception as e:
+            print(f"❌ [Log-Watcher] Fehler: {e}")
+
+    def start_faas_container(self, faas_name: str, router_container_name: str, **run_kwargs):
+        uuid_for_faas = uuid.uuid4()
+        container_name = f"FAAS-{uuid_for_faas}-container"
+
+        # Das Signal, das dein Service ausgibt, wenn er bereit ist (z.B. Flask oder FastAPI Standard)
+        READY_SIGNAL = "running on"
+
+        # 1. Container starten (Wir starten erst, damit der Log-Stream ein Ziel hat)
+        print(f"🚀 Starte FaaS-Container: {container_name}")
+        try:
+            image_tag = self.get_image_tags(faas_name)[0]
+            faas_container = self.client.containers.run(
+                image_tag,
+                name=container_name,
+                detach=True,
+                **run_kwargs
+            )
+        except Exception as e:
+            print(f"❌ Start-Fehler: {e}")
+            return None
+
+        # 2. Log-Watcher Thread starten
+        # Wir starten ihn direkt nach dem Run-Befehl
+        watcher_thread = threading.Thread(
+            target=self._log_watcher_thread,
+            args=(container_name, faas_name, READY_SIGNAL),
+            daemon=True
         )
-        return container.id
+        watcher_thread.start()
+
+        # 3. Netzwerk-Setup
+        try:
+            # Netzwerk erstellen
+            faas_network = self.create_network(uuid_for_faas)
+
+            # Container mit dem neuen Netzwerk verbinden
+            faas_network.connect(faas_container)
+
+        except Exception as e:
+            print(f"❌ Netzwerk-Fehler: {e}")
+
+        if faas_name in self.active_containers_dict:
+            self.active_containers_dict[faas_name].append(f"{uuid_for_faas}")
+        else:
+            self.active_containers_dict[faas_name] = [f"{uuid_for_faas}"]
+
+        return faas_container
+
+    #TODO: IRGENDWO IST DIE UUID GLEICH GENOMMEN ABER GEHT JAAAA CA. FEHLT NOCH STATSD UND FEHLER ANFANG
+
+
+
+    def change_health_of_faas_in_cluster(self, faas_name: str, status: str):
+        test = {
+            "faas-id": faas_name,
+            "status": status
+        }
+        url = f"http://{self.ENVOY_XDS_ADDRESS}/changeHealth"
+        try:
+            response = requests.put(url, json=test)
+            response.raise_for_status()
+            server_reply = response.json()
+            print("Server received:", server_reply)
+        except Exception as e:
+            print(f"Request failed: {e}")
+
+
+    def append_updated_faas_containers(self, faas_name: str):
+        test = {
+            "name": "hello",
+            "base-routes": [
+            ],
+            "fallback-routes": [
+            ]
+        }
+        url = f"http://{self.ENVOY_XDS_ADDRESS}/cluster"
+        print(self.build_faas_cluster_append_payload(faas_name))
+        print(test)
+        try:
+            response = requests.put(url, json=self.build_faas_cluster_append_payload(faas_name))
+            response.raise_for_status()
+            server_reply = response.json()
+            print("Server received:", server_reply)
+        except Exception as e:
+            print(f"Request failed: {e}")
+
+    def build_faas_cluster_append_payload(self, faas_cluster_name: str, priority_0_containers=None,
+                                          priority_1_containers=None) -> dict:
+        if priority_0_containers is None:
+            priority_0_containers = self.active_containers_dict[faas_cluster_name]
+        if priority_1_containers is None:
+            priority_1_containers = []
+
+        prio_0_dict = [
+            {"address": f"FAAS-{addr}-container", "port": int(5000)}
+            for addr in priority_0_containers
+        ]
+        prio_1_dict = [
+            #{"address": "envoy", "port": 10000}
+        ]
+
+        return {
+            "name": faas_cluster_name,
+            "base-routes": prio_0_dict,
+            "fallback-routes": prio_1_dict
+        }
+
+    def create_network(self, container_id):
+        network = self.client.networks.get(
+            "msadockerizedfaas_faas-net"
+        )
+        return network
+
+    def get_image_tags(self, repo_name: str):
+        found_tags = []
+        all_images = self.client.images.list()
+        print(f"Found {len(all_images)} images")
+        for img in all_images:
+            print(img.tags)
+            for tag in img.tags:
+                print(tag.split(":")[0])
+                if tag.split(":")[0] == repo_name:
+                    found_tags.append(tag)
+
+        return found_tags
 
     def stop_and_remove_container(self, container_id: str):
-        container = self.client.containers.get(container_id)
-        container.stop()
-        container.remove()
+        self.change_health_of_faas_in_cluster(container_id, "draining")
+
+        print("HAHHSHHSH")
+        print(self.active_containers_dict)
+        print(container_id)
+
+        uuid_only = container_id.split("FAAS-")[1].split('-container')[0]
+
+        target_cluster = None
+
+        # .items() ist zwingend erforderlich!
+        for cluster_name, container_list in self.active_containers_dict.items():
+            if uuid_only in container_list:
+                target_cluster = cluster_name
+                container_list.remove(uuid_only)
+                print(f"✅ {uuid_only} aus Cluster '{cluster_name}' entfernt.")
+                break
+
+        self.append_updated_faas_containers(target_cluster)
+
+        try:
+            container = self.client.containers.get(container_id)
+            print(f"Stopping and removing container {container_id}...")
+
+            container.remove(force=True)
+
+        except docker.errors.NotFound:
+            print(f"Container {container_id} not found, nothing to do.")
+        except docker.errors.APIError as e:
+            print(f"Docker API error while removing container: {e}")
 
     def check_container_status(self, container_id):
         container = self.client.containers.get(container_id=container_id)
@@ -40,12 +299,186 @@ class OrchestrationManager:
 
         return stats.keys()
 
-def get_container_port(self, container_id: str) -> dict:
-        container = self.client.containers.get(container_id)
-        container.reload()
-        ports = container.attrs["NetworkSettings"]["Ports"]
-        binding = ports.get("8080/tcp")
-        if not binding:
-            return None
+    def clear_deprecated_images(self, deprecated_images: list):
+        for image_name in deprecated_images:
+            print(f"Clear deprecated Image: {image_name}")
+            image_name = image_name.split(":")
+            try:
+                self.client.images.remove(image=image_name)
+                print(f"Deleted image: {image_name}")
+            except Exception as e:
+                print(f"Could not delete {image_name}: {e}")
 
-        return binding[0]["HostPort"]
+    def get_container_port(self, container_id: str) -> dict:
+            container = self.client.containers.get(container_id)
+            container.reload()
+            ports = container.attrs["NetworkSettings"]["Ports"]
+            binding = ports.get("8080/tcp")
+            if not binding:
+                return None
+
+            return binding[0]["HostPort"]
+
+    def push_all_faas_clusters_in_envoy(self):
+        url = f"http://{self.ENVOY_XDS_ADDRESS}/cluster"
+
+        pushing_list_base = self.CONFIGURATION_FAAS_YAML["usable-functions"].items()
+        pushing_list = []
+        try:
+            response = requests.get(url)
+            response.raise_for_status()
+            server_reply = response.json()
+            print("Server received:", server_reply)
+
+            clusters_data = server_reply.get("clusters", [])
+            existing_names = {c["name"] for c in clusters_data}
+
+            for key, config in pushing_list_base:
+                target_name = config.get("name", key)
+
+                if target_name not in existing_names:
+                    pushing_list.append(target_name)
+
+            print("Remaining items to push:", pushing_list)
+        except Exception as e:
+            print(f"Request failed: {e}")
+
+
+        for func_name in pushing_list:
+            payload = {
+                "name": func_name,
+                "dns-type": "strict",
+                "http-protocol": "http1",
+                "base-routes": [
+                ],
+                "fallback-routes": [
+                ]
+            }
+            try:
+                response = requests.post(url, json=payload)
+                response.raise_for_status()
+                server_reply = response.json()
+                print("Server received:", server_reply)
+            except Exception as e:
+                print(f"Request failed: {e}")
+
+    def push_listener_in_envoy(self):
+        url = f"http://{self.ENVOY_XDS_ADDRESS}/listener"
+
+        pushing_list_base = list(self.CONFIGURATION_FAAS_YAML["usable-functions"].items())
+        pushing_list = []
+
+        try:
+            response = requests.get(url)
+            response.raise_for_status()
+            server_reply = response.json()
+            print("Server received:", server_reply)
+
+            listeners_dict = server_reply.get("listeners", {})
+
+            existing_names = set()
+            for func_list in listeners_dict.values():
+                existing_names.update(func_list)
+
+            print("Already executing on Envoy:", existing_names)
+
+            for key, config in pushing_list_base:
+                target_name = config.get("name", key)
+                if target_name not in existing_names:
+                    pushing_list.append((key, config))
+
+            print("Remaining items to push:", pushing_list)
+
+        except Exception as e:
+            print(f"Request failed: {e}")
+
+        routes = []
+        for func_id, func_data in pushing_list:
+            func_name = func_data.get("name") or func_id
+            routes.append(self.create_route_for_listener(f"/{func_name}", func_name, "local_service"))
+            print(self.create_listener_payload(routes))
+        try:
+            response = requests.post(url, json=self.create_listener_payload(routes))
+            response.raise_for_status()
+            server_reply = response.json()
+            print("Server received:", server_reply)
+        except Exception as e:
+            print(f"Request failed: {e}")
+
+
+
+#"""
+#{
+#  "count": 1,
+#  "listeners": {
+#    "listener_0": [
+#      "hello"
+#    ]
+#  }
+#}
+#"""
+
+
+
+    @staticmethod
+    def create_listener_payload(routes):
+        return {
+            "routes": routes,
+            "virtualHosts": [
+                {
+                    "name": "local_service",
+                    "domains": ["*"]
+                }
+            ],
+            "listenerConfiguration": {
+                "listener_name": "listener_0",
+                "listener_address": "0.0.0.0",
+                "listener_port": 10000
+            }
+        }
+
+    @staticmethod
+    def create_route_for_listener(prefix, cluster_to_use, virtual_host, regex_rewrite=True):
+        route = {
+            "prefix": prefix,
+            "cluster_to_use": cluster_to_use,
+            "virtual_host": virtual_host,
+        }
+        if regex_rewrite:
+            route["regex_rewrite"] = {
+                "regex": ".*",
+                "substitution": "/"
+            }
+
+        return route
+
+"""
+        POST
+        http: // localhost: 8081 / listener
+        Content - Type: application / json
+
+        {
+            "routes": [
+                {
+                    "prefix": "/hello",
+                    "cluster_to_use": "hello",
+                    "virtual_host": "local_service",
+                    "regex_rewrite": {
+                        "regex": ".*",
+                        "substitution": "/"
+                    }
+                }
+            ],
+            "virtualHosts": [
+                {
+                    "name": "local_service",
+                    "domains": ["*"]
+                }
+            ],
+            "listenerConfiguration": {
+                "listener_name": "listener_0",
+                "listener_address": "0.0.0.0",
+                "listener_port": 10000
+            }
+        }
+"""

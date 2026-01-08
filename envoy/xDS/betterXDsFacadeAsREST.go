@@ -9,35 +9,50 @@ import (
 	"os"
 	"time"
 
+	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
+	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	routerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/router/v3"
-	"github.com/gin-gonic/gin"
-	"google.golang.org/grpc"
-	"google.golang.org/protobuf/types/known/anypb"
-
-	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
-	"github.com/envoyproxy/go-control-plane/pkg/cache/v3"
-	"github.com/envoyproxy/go-control-plane/pkg/resource/v3"
-	xds "github.com/envoyproxy/go-control-plane/pkg/server/v3"
-	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
-
+	hcm "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	clusterservice "github.com/envoyproxy/go-control-plane/envoy/service/cluster/v3"
 	discoverygrpc "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
 	endpointservice "github.com/envoyproxy/go-control-plane/envoy/service/endpoint/v3"
 	listenerservice "github.com/envoyproxy/go-control-plane/envoy/service/listener/v3"
 	routeservice "github.com/envoyproxy/go-control-plane/envoy/service/route/v3"
+	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
+	"github.com/envoyproxy/go-control-plane/pkg/cache/v3"
+	"github.com/envoyproxy/go-control-plane/pkg/resource/v3"
+	xds "github.com/envoyproxy/go-control-plane/pkg/server/v3"
+	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
+	"github.com/gin-gonic/gin"
+	"github.com/redis/go-redis/v9"
+	"google.golang.org/grpc"
+	"google.golang.org/protobuf/types/known/anypb"
 
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
-	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
-	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
-	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
-	hcm "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
+	accesslogv3 "github.com/envoyproxy/go-control-plane/envoy/service/accesslog/v3"
+)
+
+const (
+	GrpcAddressEnv = "0.0.0.0:50051"
+	NodeIDEnv      = "local_node"
+	RestPortEnv    = "8081"
+	RedisAddrEnv   = "redis-messanger:6379"
 )
 
 func main() {
-	GrpcAddressEnv := os.Getenv("GRPC_ADDRESS")
-	NodeIDEnv := os.Getenv("NODE_ID")
-	RestPortEnv := os.Getenv("REST_PORT")
+	//GrpcAddressEnv := os.Getenv("GRPC_ADDRESS")
+	//NodeIDEnv := os.Getenv("NODE_ID")
+	//RestPortEnv := os.Getenv("REST_PORT")
+	//RestPortEnv := os.Getenv("REST_PORT")
+	//RedisAddrENV := os.Getenv("REDIS_ADDR")
+	AddFaasRedisTopic := os.Getenv("TRACKING_FAAS_REDIS_TOPIC")
+	//RemoveFaasRedisTopic := os.Getenv("REMOVE_FAAS_REDIS_TOPIC")
+
+	log.Printf("RestPortEnv: %v", RestPortEnv)
+	log.Printf("RedisAddrENV: %v", RedisAddrEnv)
+	log.Printf("AddFaasRedisTopic: %v", AddFaasRedisTopic)
 
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 
@@ -55,6 +70,8 @@ func main() {
 	clusterservice.RegisterClusterDiscoveryServiceServer(grpcServer, srv)
 	routeservice.RegisterRouteDiscoveryServiceServer(grpcServer, srv)
 	listenerservice.RegisterListenerDiscoveryServiceServer(grpcServer, srv)
+
+	log.Println("✅ Access Log Service (ALS) registriert.")
 
 	// Start gRPC Server
 	lis, err := net.Listen("tcp", GrpcAddressEnv)
@@ -75,8 +92,26 @@ func main() {
 			time.Sleep(5 * time.Second)
 		}
 	}()
+	test := "redis-messanger:6379"
+	print("HSDHhSDHDS ", test)
+	rdb := redis.NewClient(&redis.Options{
+		Addr: test,
+	})
+	// 2. Test Connection (Ping)
+	pong, err := rdb.Ping(ctx).Result()
+	if err != nil {
+		fmt.Println("Could not connect to Redis:", err)
+		return
+	}
+	fmt.Println("Connected to Redis:", pong)
+	alsService := &AccessLogService{
+		RedisClient: rdb,
+	}
 
-	log.Printf("🚀 Envoy Control Plane running on gRPC %s", GrpcAddressEnv)
+	// Registrieren
+	accesslogv3.RegisterAccessLogServiceServer(grpcServer, alsService)
+
+	log.Printf("Envoy Control Plane running on gRPC %s", GrpcAddressEnv)
 	if err := grpcServer.Serve(lis); err != nil {
 		log.Fatalf("gRPC server exited: %v", err)
 	}
@@ -86,6 +121,7 @@ func main() {
 func startGinServer(snapshotCache cache.SnapshotCache, ctx context.Context, NodeIDEnv string, RestPortEnv string) {
 	r := gin.Default()
 
+	//setup functions for cluster and listener routes
 	setupClusterRoutes(r, snapshotCache, ctx, NodeIDEnv)
 	setupListenerRoutes(r, snapshotCache, ctx)
 
@@ -114,10 +150,89 @@ func startGinServer(snapshotCache cache.SnapshotCache, ctx context.Context, Node
 		}
 		c.JSON(http.StatusOK, gin.H{"status": "snapshot updated", "version": version})
 	})
-
 	log.Printf("🚀 REST API running on http://localhost:%s", RestPortEnv)
 	if err := r.Run(":" + RestPortEnv); err != nil {
 		log.Fatalf("Failed to start REST server: %v", err)
+	}
+}
+
+type AccessLogService struct {
+	accesslogv3.UnimplementedAccessLogServiceServer
+	RedisClient *redis.Client
+}
+
+func (s *AccessLogService) StreamAccessLogs(stream accesslogv3.AccessLogService_StreamAccessLogsServer) error {
+	for {
+		msg, err := stream.Recv()
+		if err != nil {
+			return err
+		}
+
+		// Getter nutzen!
+		if httpLogs := msg.GetHttpLogs(); httpLogs != nil {
+			for _, entry := range httpLogs.LogEntry {
+
+				// --- 1. Request Info & Status ---
+				statusCode := uint32(0)
+				if entry.Response != nil && entry.Response.ResponseCode != nil {
+					statusCode = entry.Response.ResponseCode.Value
+				}
+
+				reqID := "no-id"
+				if entry.Request != nil && entry.Request.RequestHeaders != nil {
+					if val, ok := entry.Request.RequestHeaders["x-request-id"]; ok {
+						reqID = val
+					}
+				}
+
+				// --- 2. Endpoint Metadata (Wo ging der Request hin?) ---
+				upstreamCluster := "unknown"
+				upstreamAddress := "unknown"
+				upstreamPort := uint32(0)
+
+				if common := entry.CommonProperties; common != nil {
+					// Cluster Name (z.B. "faas_function_1")
+					upstreamCluster = common.UpstreamCluster
+
+					// Die IP und der Port des Containers, der den Job erledigt hat
+					if remoteAddr := common.UpstreamRemoteAddress; remoteAddr != nil {
+						if socketAddr := remoteAddr.GetSocketAddress(); socketAddr != nil {
+							upstreamAddress = fmt.Sprintf("%s:%d", socketAddr.Address, socketAddr.GetPortValue())
+							upstreamPort = socketAddr.GetPortValue()
+						}
+					}
+				}
+				faasName := getEndpointMetadata(upstreamCluster, upstreamPort)
+				// --- 3. Ausgabe ---
+				log.Printf("🚀 gRPC Log: Cluster=%s | Endpoint=%s | Status=%d | ReqID=%s",
+					upstreamCluster, upstreamAddress, statusCode, reqID)
+
+				if s.RedisClient != nil {
+					ctx := context.Background()
+					if faasName != "not-found" {
+						// Your existing logic
+						s.RedisClient.Set(ctx, faasName+":"+faasName, 1, 0) // Added 0 for no expiration on this key
+						s.RedisClient.Incr(ctx, faasName+":timer")
+						s.RedisClient.Expire(ctx, faasName+":timer", 10*time.Second)
+
+						// New: Publish to a channel named after the faasName
+						channel := faasName + "/events"
+						payload := "updated"
+
+						// Publish returns the number of subscribers that received the message
+						subscribers, err := s.RedisClient.Publish(ctx, channel, payload).Result()
+						if err != nil {
+							// Handle error (e.g., log.Printf("redis publish error: %v", err))
+						}
+
+						_ = subscribers // Useful if you want to verify someone is listening
+					}
+				}
+
+				// TIPP: Da du hier im Go-Code bist, kannst du jetzt anhand der 'upstreamAddress'
+				// in deinem Cache nachschauen, welche Container-ID das war, falls du sie brauchst!
+			}
+		}
 	}
 }
 
@@ -135,6 +250,11 @@ type ClusterRemove struct {
 type ClusterReplace struct {
 	ClusterInput
 	Replace bool `json:"replace"`
+}
+
+type ClusterHealth struct {
+	FaasId string `json:"faas-id" binding:"required"`
+	Status string `json:"status" binding:"required"`
 }
 
 func setupClusterRoutes(r *gin.Engine, snapshotCache cache.SnapshotCache, ctx context.Context, NodeIDEnv string) {
@@ -168,13 +288,11 @@ func setupClusterRoutes(r *gin.Engine, snapshotCache cache.SnapshotCache, ctx co
 
 	})
 	r.GET("/cluster", func(c *gin.Context) {
-		// Convert clusters to a JSON-friendly format if needed
 		clusters := make([]map[string]interface{}, len(CurrentClusters))
 		for i, cl := range CurrentClusters {
 			clusters[i] = map[string]interface{}{
 				"name": cl.Name,
 				"type": cl.GetType().String(),
-				// Add more fields if needed
 			}
 		}
 
@@ -183,6 +301,7 @@ func setupClusterRoutes(r *gin.Engine, snapshotCache cache.SnapshotCache, ctx co
 			"count":    len(clusters),
 		})
 	})
+
 	r.DELETE("/cluster", func(c *gin.Context) {
 		var input ClusterRemove
 		if err := c.ShouldBindJSON(&input); err != nil {
@@ -202,16 +321,43 @@ func setupClusterRoutes(r *gin.Engine, snapshotCache cache.SnapshotCache, ctx co
 			c.JSON(http.StatusConflict, "No cluster with name exists")
 		}
 	})
-	r.PUT("/cluster", func(c *gin.Context) {
-		var input ClusterReplace
+
+	r.PUT("/changeHealth", func(c *gin.Context) {
+		var input ClusterHealth
 
 		if err := c.ShouldBindJSON(&input); err != nil {
 			c.JSON(400, gin.H{"error": err.Error()})
 			return
 		}
 
+		for _, cl := range CurrentClusters {
+			updateHealthIfMetadataMatches(cl.Name, input.FaasId, input.Status)
+		}
+
+		snapshot, err := updateSnapshot(snapshotCache, ctx)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{"status": "snapshot updated", "version": snapshot})
+		return
+	})
+
+	r.PUT("/cluster", func(c *gin.Context) {
+		println("HALLO ICH BIN DRINN ABER")
+		var input ClusterReplace
+
+		if err := c.ShouldBindJSON(&input); err != nil {
+			c.JSON(400, gin.H{"error": err.Error()})
+			return
+		}
+		log.Println("INIPOUTI")
+		log.Println(input)
 		var baseRoutes []Route = input.BaseRoutes
 		var fallbackRoutes []Route = input.FallbackRoutes
+		log.Println(baseRoutes)
+		log.Println(fallbackRoutes)
 		var foundCluster *clusterv3.Cluster
 		for _, cluster := range CurrentClusters {
 			if cluster.Name == input.Name {
@@ -222,9 +368,11 @@ func setupClusterRoutes(r *gin.Engine, snapshotCache cache.SnapshotCache, ctx co
 
 		if foundCluster != nil {
 			removeCluster(foundCluster.Name)
+			log.Println(foundCluster, "NAJHA2323233")
 			if input.Replace && (len(baseRoutes) > 0 || len(fallbackRoutes) > 0) {
 				replaceRoutesOnCluster(foundCluster, baseRoutes, fallbackRoutes)
 			} else {
+				log.Println(foundCluster, "NAJHA")
 				appendRoutesToCluster(foundCluster, baseRoutes, fallbackRoutes)
 			}
 
@@ -248,6 +396,25 @@ type ListenerAddClusterInput struct {
 }
 
 func setupListenerRoutes(r *gin.Engine, snapshotCache cache.SnapshotCache, ctx context.Context) {
+	r.GET("/listener", func(c *gin.Context) {
+		listenerMap := make(map[string][]string)
+		currentLisConf := getCurrentListenerConfigurations()
+
+		for _, l := range currentLisConf {
+			var allClusters []string
+
+			for _, route := range l.Routes {
+				allClusters = append(allClusters, route.ClusterToUse)
+			}
+			listenerMap[l.ListenerConfiguration.ListenerName] = allClusters
+		}
+
+		c.JSON(200, gin.H{
+			"listeners": listenerMap,
+			"count":     len(listenerMap),
+		})
+	})
+
 	r.POST("/listener", func(c *gin.Context) {
 		var input Config
 
@@ -279,25 +446,68 @@ func setupListenerRoutes(r *gin.Engine, snapshotCache cache.SnapshotCache, ctx c
 			c.JSON(400, gin.H{"error": err.Error()})
 			return
 		}
-		CurrentListeners = []*listenerv3.Listener{}
-		index := addClusterToListener(input.Route, input.ListenerName)
-		err := createListener(CurrentListenerConfigurations[index].Routes, CurrentListenerConfigurations[index].VirtualHosts, CurrentListenerConfigurations[index].ListenerConfiguration)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+
+		var found bool = false
+
+		for i, listener := range CurrentListenerConfigurations {
+			if listener.ListenerConfiguration.ListenerName == input.ListenerName {
+				routeExists := false
+				for _, r := range listener.Routes {
+					if r.ClusterToUse == input.Route.ClusterToUse {
+						routeExists = true
+						break
+					} else if r.Prefix == input.Route.Prefix {
+						routeExists = true
+						break
+					}
+				}
+
+				if !routeExists {
+					CurrentListenerConfigurations[i].Routes = append(listener.Routes, input.Route)
+				}
+
+				found = true
+				break
+			}
+		}
+
+		if found {
+			var newListeners []*listenerv3.Listener
+			for i, c := range CurrentListeners {
+				if c.Name != input.ListenerName {
+					newListeners = append(newListeners, newListeners[i])
+				}
+			}
+			CurrentListeners = newListeners
+
+		}
+
+		if !found {
+			CurrentListeners = []*listenerv3.Listener{}
+			index := addClusterToListener(input.Route, input.ListenerName)
+			err := createListener(CurrentListenerConfigurations[index].Routes, CurrentListenerConfigurations[index].VirtualHosts, CurrentListenerConfigurations[index].ListenerConfiguration)
+			_, err2 := updateSnapshot(snapshotCache, ctx)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			if err2 != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err2.Error()})
+				return
+			}
+			c.JSON(http.StatusOK, gin.H{"status": "snapshot updated", "version": CurrentListeners})
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"status": "snapshot updated", "version": CurrentListeners})
+		c.JSON(http.StatusOK, gin.H{"status": "No change!"})
 	})
 }
 
-// Fixed generateSnapshot (Returns error now)
 func generateSnapshot(version string) (*cache.Snapshot, error) {
 	// Cluster
 	cls := &clusterv3.Cluster{
 		Name:           "example_backend",
 		ConnectTimeout: nil,
 
-		// CHANGE THIS: Use LOGICAL_DNS so Envoy can resolve the hostname "control-plane"
 		ClusterDiscoveryType: &clusterv3.Cluster_Type{Type: clusterv3.Cluster_LOGICAL_DNS},
 
 		LbPolicy: clusterv3.Cluster_ROUND_ROBIN,

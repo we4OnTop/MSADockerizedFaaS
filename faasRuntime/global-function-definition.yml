@@ -1,0 +1,17 @@
+usable-functions:
+  hello:
+    name: "hello"
+    version: 1.6
+    configuration:
+      programing_language: "python"
+      base_function_file_name: "hello.py"
+      function_folder: "hello"
+      extra_dependencies: ""
+  other_hello:
+    name: "hello_function_2"
+    version: 0.1
+    configuration:
+      programing_language: "python"
+      base_function_file_name: "hello.py"
+      function_folder: "hello"
+      extra_dependencies: ""

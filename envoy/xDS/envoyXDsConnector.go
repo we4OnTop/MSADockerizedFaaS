@@ -11,15 +11,20 @@ import (
 	"strings"
 	"time"
 
+	accesslogv3 "github.com/envoyproxy/go-control-plane/envoy/config/accesslog/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	tracev3 "github.com/envoyproxy/go-control-plane/envoy/config/trace/v3"
+	accessloggrpc "github.com/envoyproxy/go-control-plane/envoy/extensions/access_loggers/grpc/v3"
 	routerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/router/v3"
 	hcm "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	httpv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/upstreams/http/v3"
+	matcherv3 "github.com/envoyproxy/go-control-plane/envoy/type/matcher/v3"
 	typev3 "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/resource/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/durationpb"
+	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 
 	// Envoy Control Plane Core
@@ -51,6 +56,31 @@ func checkIfClusterNameUnique(clusterName string) bool {
 		}
 	}
 	return false
+}
+
+func getEndpointMetadata(clusterName string, searchPort uint32) string {
+	for _, cluster := range CurrentClusters {
+		if cluster.Name == clusterName {
+			if cluster.LoadAssignment == nil {
+				continue
+			}
+			for _, locality := range cluster.LoadAssignment.Endpoints {
+				for _, lbEndpoint := range locality.LbEndpoints {
+					port := lbEndpoint.GetEndpoint().GetAddress().GetSocketAddress().GetPortValue()
+					if port == searchPort {
+						meta := lbEndpoint.GetMetadata().GetFilterMetadata()["envoy.lb"]
+						if meta != nil {
+							if val, ok := meta.Fields["faas_id"]; ok {
+								return val.GetStringValue()
+							}
+						}
+						return "found-but-no-metadata"
+					}
+				}
+			}
+		}
+	}
+	return "not-found"
 }
 
 var registeredDNSTypes = map[string]clusterv3.Cluster_DiscoveryType{
@@ -86,7 +116,7 @@ func toResources[T types.Resource](items []T) []types.Resource {
 }
 
 func updateSnapshot(snapshotCache cache.SnapshotCache, ctx context.Context) (*cache.Snapshot, error) {
-	log.Printf("Error setting snapshot: %v", CurrentListeners)
+	// 1. Snapshot-Objekt erstellen
 	snap, err := cache.NewSnapshot(
 		fmt.Sprintf("v%d", snapshotNumber),
 		map[resource.Type][]types.Resource{
@@ -100,10 +130,26 @@ func updateSnapshot(snapshotCache cache.SnapshotCache, ctx context.Context) (*ca
 
 	NodeIDEnv := os.Getenv("NODE_ID")
 
+	// 2. Snapshot im Cache setzen (Pusht die Config an Envoy)
 	if err := snapshotCache.SetSnapshot(ctx, NodeIDEnv, snap); err != nil {
 		return nil, fmt.Errorf("failed to set snapshot: %v", err)
 	}
-	snapshotNumber = snapshotNumber + 1
+
+	// --- Ab hier war der Push erfolgreich ---
+
+	// 3. Zähler erst nach Erfolg erhöhen
+	snapshotNumber++
+
+	// 4. Blockliste an Nginx/Gatekeeper pushen
+	// Da der Snapshot bereits gesetzt ist, ist dieser Schritt kritisch für die Synchronisation
+	if err := pushClusterBlockList(); err != nil {
+		// Wir loggen den Fehler, geben aber den Snapshot zurück,
+		// da Envoy die neuen Cluster bereits kennt.
+		log.Printf("CRITICAL: Snapshot set but failed to push blocklist: %v", err)
+		return snap, fmt.Errorf("snapshot active but blocklist sync failed: %v", err)
+	}
+
+	log.Printf("Successfully updated snapshot v%d and pushed blocklist", snapshotNumber-1)
 	return snap, nil
 }
 
@@ -114,14 +160,14 @@ func createCluster(clusterName string, discoveryType clusterv3.Cluster_Discovery
 		},
 	}
 
-	// 2. Konvertiere die Konfiguration in einen anypb.Any Typ
+	//Converting the configuration to an anypb.Any Type
 	pbst, err := anypb.New(httpProtocolOptions)
 	if err != nil {
-		// Fehlerbehandlung (panic oder return error, je nach Architektur)
+		// Panic error
 		panic(err)
 	}
 
-	// 3. Definiere den Cluster
+	//Define an Cluster
 	cls := clusterv3.Cluster{
 		Name:                 clusterName,
 		ConnectTimeout:       durationpb.New(time.Second * 2),
@@ -176,9 +222,14 @@ func appendNewCluster(newCluster *clusterv3.Cluster) {
 
 func removeCluster(clusterName string) {
 	var newClusters []*clusterv3.Cluster
-	for i, c := range CurrentClusters {
+	print("HAHAHHAHHAHDSHH")
+	print(CurrentClusters)
+	for _, c := range CurrentClusters {
+		print(c.Name)
+		print(c)
 		if c.Name != clusterName {
-			newClusters = append(newClusters, newClusters[i])
+			print("HAHAHHAHHAHDSHH22222222")
+			newClusters = append(newClusters, c)
 		}
 	}
 	CurrentClusters = newClusters
@@ -188,6 +239,7 @@ func removeCluster(clusterName string) {
 type Route struct {
 	Address string `json:"address" binding:"required"`
 	Port    uint32 `json:"port" binding:"required"`
+	Status  string `json:"status"`
 }
 
 func replaceRoutesOnCluster(cls *clusterv3.Cluster, baseRoutes []Route, fallbackRoutes []Route) {
@@ -212,21 +264,28 @@ func replaceRoutesOnCluster(cls *clusterv3.Cluster, baseRoutes []Route, fallback
 		}
 		// Append endpoints
 		for _, item := range routes {
-			locality.LbEndpoints = append(locality.LbEndpoints, createHost(item.Address, item.Port))
+			locality.LbEndpoints = append(locality.LbEndpoints, createHost(item.Address, item.Port, item.Status))
 		}
 	}
 
-	// Add base routes
+	// Add routes
 	addEndpoints(baseRoutePriority, baseRoutes)
-
-	// Add fallback routes
 	addEndpoints(fallbackPriority, fallbackRoutes)
 
-	routesThere := len(baseRoutes) > 0 && len(fallbackRoutes) > 0
+	routesThere := hasHealthyEndpoints(baseRoutes)
 	err := updateBlockList(cls.Name, routesThere)
 	if err != nil {
 		return
 	}
+}
+
+func hasHealthyEndpoints(routes []Route) bool {
+	for _, route := range routes {
+		if strings.ToLower(route.Status) != "draining" && strings.ToLower(route.Status) == "unhealthy" {
+			return true
+		}
+	}
+	return len(routes) > 0
 }
 
 func appendRoutesToCluster(cls *clusterv3.Cluster, baseRoutes []Route, fallbackRoutes []Route) {
@@ -259,18 +318,16 @@ func appendRoutesToCluster(cls *clusterv3.Cluster, baseRoutes []Route, fallbackR
 		}
 		// Append endpoints
 		for _, item := range routes {
-			locality.LbEndpoints = append(locality.LbEndpoints, createHost(item.Address, item.Port))
+			locality.LbEndpoints = append(locality.LbEndpoints, createHost(item.Address, item.Port, item.Status))
 		}
 
 	}
 
-	// Add base routes
+	// Add routes
 	addEndpoints(baseRoutePriority, baseRoutes)
-
-	// Add fallback routes
 	addEndpoints(fallbackPriority, fallbackRoutes)
 
-	routesThere := len(baseRoutes) > 0 && len(fallbackRoutes) > 0
+	routesThere := hasHealthyEndpoints(baseRoutes)
 	err := updateBlockList(cls.Name, routesThere)
 	if err != nil {
 		return
@@ -278,7 +335,14 @@ func appendRoutesToCluster(cls *clusterv3.Cluster, baseRoutes []Route, fallbackR
 	println(cls)
 }
 
-func createHost(addr string, port uint32) *endpointv3.LbEndpoint {
+func createHost(addr string, port uint32, status string) *endpointv3.LbEndpoint {
+	baseStatus := corev3.HealthStatus(corev3.HealthStatus_HEALTHY)
+	if strings.ToLower(status) == "draining" {
+		baseStatus = corev3.HealthStatus_DRAINING
+	} else if strings.ToLower(status) == "unhealthy" {
+		baseStatus = corev3.HealthStatus_UNHEALTHY
+	}
+
 	return &endpointv3.LbEndpoint{
 		HostIdentifier: &endpointv3.LbEndpoint_Endpoint{
 			Endpoint: &endpointv3.Endpoint{
@@ -294,14 +358,69 @@ func createHost(addr string, port uint32) *endpointv3.LbEndpoint {
 				},
 			},
 		},
-		//HealthStatus: corev3.HealthStatus(corev3.HealthStatus_UNHEALTHY),
+		Metadata: &corev3.Metadata{
+			FilterMetadata: map[string]*structpb.Struct{
+				"envoy.lb": {
+					Fields: map[string]*structpb.Value{
+						"faas_id": structpb.NewStringValue(addr),
+					},
+				},
+			},
+		},
+		HealthStatus: baseStatus,
 	}
 }
 
+func updateHealthIfMetadataMatches(
+	clusterName string,
+	targetFaasID string,
+	status string,
+) bool {
+	baseStatus := corev3.HealthStatus(corev3.HealthStatus_HEALTHY)
+	if strings.ToLower(status) == "draining" {
+		baseStatus = corev3.HealthStatus_DRAINING
+	} else if strings.ToLower(status) == "unhealthy" {
+		baseStatus = corev3.HealthStatus_UNHEALTHY
+	}
+	for _, cluster := range CurrentClusters {
+		if cluster.Name != clusterName || cluster.LoadAssignment == nil {
+			continue
+		}
+
+		for _, locality := range cluster.LoadAssignment.Endpoints {
+			for _, lbEndpoint := range locality.LbEndpoints {
+
+				metadata := lbEndpoint.GetMetadata()
+				lbMeta, ok := metadata.GetFilterMetadata()["envoy.lb"]
+				if !ok {
+					continue
+				}
+
+				faasIDField, ok := lbMeta.Fields["faas_id"]
+				if !ok || faasIDField.GetStringValue() != targetFaasID {
+					continue
+				}
+
+				lbEndpoint.HealthStatus = baseStatus
+				log.Printf("✅ Health Updated: Cluster=%s, FaasID=%s -> %s",
+					clusterName, targetFaasID, baseStatus.String())
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+type RegexRewriteDefinition struct {
+	Regex        string `json:"regex" binding:"required"`
+	Substitution string `json:"substitution" binding:"required"`
+}
 type ListenerRoute struct {
-	Prefix       string `json:"prefix" binding:"required"`
-	ClusterToUse string `json:"cluster_to_use" binding:"required"`
-	VirtualHost  string `json:"virtual_host" binding:"required"`
+	Prefix       string                  `json:"prefix" binding:"required"`
+	ClusterToUse string                  `json:"cluster_to_use" binding:"required"`
+	RegexRewrite *RegexRewriteDefinition `json:"regex_rewrite"`
+	VirtualHost  string                  `json:"virtual_host" binding:"required"`
 }
 
 type VirtualHost struct {
@@ -326,13 +445,14 @@ func createListener(
 	virtualHosts []VirtualHost,
 	listenerConfiguration ListenerConfiguration,
 ) error {
-	// Map routes per virtual host
+	//Map routes per virtual host
 	vhMap := make(map[string][]*routev3.Route)
 	for _, route := range routes {
-		vhMap[route.VirtualHost] = append(vhMap[route.VirtualHost], createRouteComponent(route.Prefix, route.ClusterToUse))
+		regexRewrite := route.RegexRewrite
+		vhMap[route.VirtualHost] = append(vhMap[route.VirtualHost], createRouteComponent(route.Prefix, route.ClusterToUse, regexRewrite))
 	}
 
-	// Build Envoy VirtualHosts
+	//Build Envoy VirtualHosts
 	var envoyVHs []*routev3.VirtualHost
 	for _, vh := range virtualHosts {
 		mappedRoutes := vhMap[vh.Name] // get routes for this virtual host
@@ -343,15 +463,75 @@ func createListener(
 		})
 	}
 
-	// --- FIX: Create router filter config ---
+	//Create router filter config
 	routerConfig, err := anypb.New(&routerv3.Router{})
 	if err != nil {
 		return fmt.Errorf("failed to create router config: %v", err)
 	}
 
+	zipkinConfig := &tracev3.ZipkinConfig{
+		CollectorCluster:         "jaeger",        // Must match your cluster name
+		CollectorEndpoint:        "/api/v2/spans", // Standard Jaeger endpoint
+		TraceId_128Bit:           true,
+		CollectorEndpointVersion: tracev3.ZipkinConfig_HTTP_JSON,
+	}
+
+	// 2. Marshal it into an 'Any' protobuf message
+	zipkinTypedConfig, err := anypb.New(zipkinConfig)
+	if err != nil {
+		panic(err) // Handle error appropriately
+	}
+
+	grpcAccessLogConfig := &accessloggrpc.HttpGrpcAccessLogConfig{
+		CommonConfig: &accessloggrpc.CommonGrpcAccessLogConfig{
+			// Ein Name für diesen Log-Stream (kannst du im Go-Server filtern)
+			LogName:             "faas_access_log",
+			TransportApiVersion: corev3.ApiVersion_V3,
+			GrpcService: &corev3.GrpcService{
+				TargetSpecifier: &corev3.GrpcService_EnvoyGrpc_{
+					EnvoyGrpc: &corev3.GrpcService_EnvoyGrpc{
+						// WICHTIG: Das muss der Cluster-Name sein, unter dem Envoy
+						// deinen Go-Server (Control Plane) erreicht.
+						// Meistens "xds_cluster" oder "control-plane".
+						ClusterName: "xds_cluster",
+					},
+				},
+			},
+		},
+		// Optional: Zusätzliche Header, die im Log erscheinen sollen
+		AdditionalRequestHeadersToLog: []string{"x-request-id", "x-faas-container-id"},
+	}
+
+	// Verpacken in "Any"
+	accessLogTyped, err := anypb.New(grpcAccessLogConfig)
+	if err != nil {
+		return fmt.Errorf("failed to marshal Access Log Config: %v", err)
+	}
+
 	hcmConfig := &hcm.HttpConnectionManager{
 
 		StatPrefix: listenerConfiguration.ListenerName,
+
+		GenerateRequestId: &wrapperspb.BoolValue{Value: true},
+
+		AccessLog: []*accesslogv3.AccessLog{
+			{
+				Name: "envoy.access_loggers.file",
+				ConfigType: &accesslogv3.AccessLog_TypedConfig{
+					TypedConfig: accessLogTyped,
+				},
+			},
+		},
+
+		Tracing: &hcm.HttpConnectionManager_Tracing{
+			Provider: &tracev3.Tracing_Http{
+				Name: "envoy.tracers.zipkin",
+				ConfigType: &tracev3.Tracing_Http_TypedConfig{
+					TypedConfig: zipkinTypedConfig,
+				},
+			},
+		},
+
 		RouteSpecifier: &hcm.HttpConnectionManager_RouteConfig{
 			RouteConfig: &routev3.RouteConfiguration{
 				Name:         listenerConfiguration.ListenerName + "_route",
@@ -373,7 +553,7 @@ func createListener(
 		return fmt.Errorf("failed to marshal HCM: %v", err)
 	}
 
-	// Listener
+	//Listener
 	lis := &listenerv3.Listener{
 		Name: listenerConfiguration.ListenerName,
 		Address: &corev3.Address{
@@ -416,6 +596,10 @@ func addClusterToListener(route ListenerRoute, listenerName string) int {
 	return -1
 }
 
+func getCurrentListenerConfigurations() []*Config {
+	return CurrentListenerConfigurations
+}
+
 func removeClusterFromListener(route ListenerRoute, listenerName string) bool {
 	for i, config := range CurrentListenerConfigurations {
 		if config.ListenerConfiguration.ListenerName == listenerName {
@@ -448,21 +632,45 @@ func removeClusterFromListenerGlobal(clusterToRemove string, listenerName string
 	return false
 }
 
-func createRouteComponent(prefix string, routeToCluster string) *routev3.Route {
-	route := &routev3.Route{
+func createRouteComponent(prefix string, routeToCluster string, regexRewrite *RegexRewriteDefinition) *routev3.Route {
+	// Gemeinsame Retry-Policy definieren
+	retryPolicy := &routev3.RetryPolicy{
+		RetryOn:    "5xx,connect-failure,refused-stream",
+		NumRetries: &wrapperspb.UInt32Value{Value: 10},
+		RetryBackOff: &routev3.RetryPolicy_RetryBackOff{
+			BaseInterval: durationpb.New(50 * time.Millisecond), // Etwas Puffer für den Cluster-Warmup
+			MaxInterval:  durationpb.New(200 * time.Millisecond),
+		},
+	}
+
+	routeAction := &routev3.RouteAction{
+		ClusterSpecifier: &routev3.RouteAction_Cluster{
+			Cluster: routeToCluster,
+		},
+		RetryPolicy: retryPolicy, // Policy wird hier für beide Fälle zugewiesen
+	}
+
+	// Falls Rewrite-Logik benötigt wird, hinzufügen
+	if regexRewrite != nil {
+		routeAction.RegexRewrite = &matcherv3.RegexMatchAndSubstitute{
+			Pattern: &matcherv3.RegexMatcher{
+				Regex: regexRewrite.Regex,
+			},
+			Substitution: regexRewrite.Substitution,
+		}
+	}
+
+	return &routev3.Route{
 		Match: &routev3.RouteMatch{
 			PathSpecifier: &routev3.RouteMatch_Prefix{Prefix: prefix},
 		},
 		Action: &routev3.Route_Route{
-			Route: &routev3.RouteAction{
-				ClusterSpecifier: &routev3.RouteAction_Cluster{
-					Cluster: routeToCluster,
-				},
-			},
+			Route: routeAction,
 		},
 	}
-	return route
 }
+
+//Functions to push data to Nginx
 
 func pushClusterBlockList() error {
 	payload := struct {
@@ -535,17 +743,9 @@ func updateBlockList(clusterName string, routesThere bool) error {
 	formattedList := strings.Join(ClusterBlockList, ", ")
 	fmt.Println("\n--- Comma Separated ---")
 	fmt.Println(formattedList)
-	return pushClusterBlockList()
+	return nil
 }
 
-/*
-	locality = &endpointv3.LocalityLbEndpoints{
-					Priority:    priority,
-					LbEndpoints: []*endpointv3.LbEndpoint{},
-				}
-				cls.LoadAssignment.Endpoints = append(cls.LoadAssignment.Endpoints, locality)
-				existingPriorities[priority] = locality
-*/
 func updateFullClusterBlock() {
 	for _, cluster := range CurrentClusters {
 		clusterName := cluster.Name
