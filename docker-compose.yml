@@ -39,6 +39,8 @@ services:
       - proxy-net
       - layers-messaging-net
       - managing-net
+    depends_on:
+      - envoy
 
   prometheus:
     image: prom/prometheus:latest
@@ -135,10 +137,12 @@ services:
       dockerfile: ./orchestration/Dockerfile
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      - ./faasRuntime:/app/faasRuntime
     environment:
       - DOCKER_HOST=unix:///var/run/docker.sock
       - REDIS_URL=redis-messanger
-      - FAAS_CONFIG_YAML_PATH=./global-function-definition.yml
+      - FAAS_CONFIG_YAML_PATH=./faasRuntime/global-function-definition.yml
+      - FAAS_ROOT_FOLDER_PATH=./faasRuntime
     networks:
       - managing-net
     depends_on:
