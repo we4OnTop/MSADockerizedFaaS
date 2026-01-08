@@ -211,6 +211,7 @@ func (s *AccessLogService) StreamAccessLogs(stream accesslogv3.AccessLogService_
 					ctx := context.Background()
 					if faasName != "not-found" {
 						// Your existing logic
+						log.Printf("Using FAAS Name %s", faasName)
 						s.RedisClient.Set(ctx, faasName+":"+faasName, 1, 0) // Added 0 for no expiration on this key
 						s.RedisClient.Incr(ctx, faasName+":timer")
 						s.RedisClient.Expire(ctx, faasName+":timer", 10*time.Second)

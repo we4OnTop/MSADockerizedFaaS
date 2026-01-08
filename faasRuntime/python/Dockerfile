@@ -12,7 +12,7 @@ RUN uv export --frozen --format=requirements-txt > requirements.txt && \
 
 ARG EXTRA_DEPS=""
 RUN if [ -n "$EXTRA_DEPS" ]; then \
-        uv pip install $EXTRA_DEPS; \
+        uv pip install --system $EXTRA_DEPS; \
     fi
 
 # slim runtime image

@@ -25,23 +25,19 @@ class RedisMessangerConnector:
             decode_responses=True
 
         )
+        self.counter_tracker = {}
 
         self.executor = ThreadPoolExecutor(max_workers=5)
-        # ... your existing init code ...
         self.r = redis.Redis(host=self.host, port=int(self.port), decode_responses=True)
 
-        # Ensure Redis has Expiry notifications enabled via code
         try:
             self.r.config_set("notify-keyspace-events", "Ex")
         except redis.exceptions.ResponseError:
-            print("⚠️ Warning: Could not set CONFIG. Ensure Redis allows config changes.")
+            print("Warning: Could not set config. Ensure Redis allows config changes.")
 
-    def listen_to_topic(self, topic):
+    def listen_to_topic(self):
         pubsub = self.r.pubsub()
 
-        # We subscribe to two patterns:
-        # 1. Your standard FAAS topics
-        # 2. The internal Redis expiration events
         pubsub.psubscribe("FAASFunctions/*", "__keyevent@0__:expired")
 
         print("👂 Listening for FAAS events and TTL expirations...")
@@ -51,23 +47,31 @@ class RedisMessangerConnector:
                 continue
 
             channel = message.get("channel")
-            data = message.get("data")  # For expired events, 'data' is the KEY NAME
+            data = message.get("data")
 
-            # --- CASE A: EXPIRED EVENT ---
             if "expired" in channel:
                 print(f"⏰ TTL EXPIRED: Key '{data}' is gone.")
-                # data is the name of the key that just died
-                # Example: If key 'FAASFunctions/my-func' expires, data = 'FAASFunctions/my-func'
                 self.handle_expiry(data)
                 continue
 
-            # --- CASE B: STANDARD FAAS EVENT ---
             if channel.startswith("FAASFunctions/"):
-                print(f"\n📩 Standard Event on {channel}")
-                # ... your existing logic for increments ...
-                self.orchestrator.start_faas_container(channel.split("//")[1], "msadockerizedfaas-envoy-1")
+                increment_event = True
+                decrement_event = False
 
-                print(f"➕ Increment event → new value: {int(data)}")
+                for cluster_name, item in self.counter_tracker.items():
+                    if cluster_name == channel:
+                        increment_event = item < int(data)
+                        decrement_event = item > int(data)
+
+                self.counter_tracker[channel] = int(data)
+
+                if increment_event:
+                    print(f"\n📩 Standard Event on {channel}")
+                    self.orchestrator.start_faas_container(channel.split("//")[1], "msadockerizedfaas-envoy-1")
+
+                    print(f"➕ Increment event → new value: {int(data)}")
+                else:
+                    print("Other Event ")
                 continue
 
     def handle_expiry(self, data):

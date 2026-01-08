@@ -60,12 +60,16 @@ func checkIfClusterNameUnique(clusterName string) bool {
 
 func getEndpointMetadata(clusterName string, searchPort uint32) string {
 	for _, cluster := range CurrentClusters {
+		print("Searching cluster... ", clusterName)
+		print("Found cluster... ", cluster.Name)
 		if cluster.Name == clusterName {
 			if cluster.LoadAssignment == nil {
 				continue
 			}
 			for _, locality := range cluster.LoadAssignment.Endpoints {
 				for _, lbEndpoint := range locality.LbEndpoints {
+					print("Address found: ", lbEndpoint.GetEndpoint().GetAddress())
+					print("Metadata found: ", lbEndpoint.GetMetadata().GetFilterMetadata())
 					port := lbEndpoint.GetEndpoint().GetAddress().GetSocketAddress().GetPortValue()
 					if port == searchPort {
 						meta := lbEndpoint.GetMetadata().GetFilterMetadata()["envoy.lb"]
@@ -244,7 +248,20 @@ type Route struct {
 
 func replaceRoutesOnCluster(cls *clusterv3.Cluster, baseRoutes []Route, fallbackRoutes []Route) {
 
-	cls.LoadAssignment = &endpointv3.ClusterLoadAssignment{}
+	// 1. Sicherstellen, dass das Struct existiert und den Namen hat
+	if cls.LoadAssignment == nil {
+		cls.LoadAssignment = &endpointv3.ClusterLoadAssignment{
+			ClusterName: cls.Name,
+		}
+	} else {
+		// Falls es existiert, sicherstellen, dass der Name stimmt (optional, aber gut)
+		if cls.LoadAssignment.ClusterName == "" {
+			cls.LoadAssignment.ClusterName = cls.Name
+		}
+	}
+
+	// 2. WICHTIG: Statt das Objekt zu ersetzen, setzen wir nur die Endpoints auf leer zurück.
+	// Damit behalten wir den Pointer und den ClusterName.
 	cls.LoadAssignment.Endpoints = []*endpointv3.LocalityLbEndpoints{}
 
 	// Track existing priorities
@@ -673,6 +690,7 @@ func createRouteComponent(prefix string, routeToCluster string, regexRewrite *Re
 //Functions to push data to Nginx
 
 func pushClusterBlockList() error {
+	time.Sleep(10 * time.Millisecond)
 	payload := struct {
 		Blocked []string `json:"blocked"`
 	}{

@@ -22,6 +22,7 @@ services:
     networks:
       - proxy-net
       - layers-messaging-net
+      - managing-net
     depends_on:
       - gate
       - envoy
@@ -37,6 +38,7 @@ services:
     networks:
       - proxy-net
       - layers-messaging-net
+      - managing-net
 
   prometheus:
     image: prom/prometheus:latest
@@ -103,15 +105,6 @@ services:
       - WEBHOOK_URL=http://webhook:5000/alert
     network_mode: service:envoy
 
-
-  backend:
-    image: python:3
-    ports:
-      - "8000:8000"
-    command: python -m http.server 8000
-    networks:
-      - faas-net
-
   redis:
     image: redis:alpine
     container_name: redis-messanger
@@ -120,6 +113,7 @@ services:
     command: ["redis-server", "--notify-keyspace-events", "Ex"]
     networks:
       - layers-messaging-net
+      - managing-net
 
   redis-rest-pusher:
     build:
@@ -135,6 +129,26 @@ services:
     networks:
       - layers-messaging-net
 
+  orchestrator:
+    build:
+      context: .
+      dockerfile: ./orchestration/Dockerfile
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - DOCKER_HOST=unix:///var/run/docker.sock
+      - REDIS_URL=redis-messanger
+      - FAAS_CONFIG_YAML_PATH=./global-function-definition.yml
+    networks:
+      - managing-net
+    depends_on:
+      - envoy
+      - xds_connector
+      - redis
+      - redis-rest-pusher
+      - gate
+
+
 volumes:
   shared-logs:
 
@@ -143,3 +157,4 @@ networks:
   proxy-net:
   faas-net:
   layers-messaging-net:
+  managing-net:
