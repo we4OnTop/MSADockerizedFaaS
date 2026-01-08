@@ -12,10 +12,13 @@ import yaml
 
 class OrchestrationManager:
     def __init__(self):
-        faas_config_yaml_path = os.environ["FAAS_CONFIG_YAML_PATH"] = "./../faasRuntime/global-function-definition.yml"
-        self.faas_root_folder_path = os.environ["FAAS_ROOT_FOLDER_PATH"] = "./../faasRuntime"
-        self.BASE_FAAS_PORT = os.environ["BASE_FAAS_PORT"] = "5000"
-        self.ENVOY_XDS_ADDRESS = os.environ["ENVOY_XDS_ADDRESS"] = "localhost:8081"
+        faas_config_yaml_path = os.environ.get(
+            "FAAS_CONFIG_YAML_PATH",
+            "./../faasRuntime/global-function-definition.yml"
+        )
+        self.faas_root_folder_path = os.environ.get("FAAS_ROOT_FOLDER_PATH", "./../faasRuntime")
+        self.BASE_FAAS_PORT = os.environ.get("BASE_FAAS_PORT", "5000")
+        self.ENVOY_XDS_ADDRESS = os.environ.get("ENVOY_XDS_ADDRESS", "xds_connector:8081")
         self.client = docker.from_env()
 
         self.active_containers_dict = {}
@@ -26,11 +29,6 @@ class OrchestrationManager:
                 print("YAML syntax is valid.")
             except yaml.YAMLError as exc:
                 print(f"Syntax error in YAML file: {exc}")
-        """        
-        self.image = self.build_image(".", "Dockerfile", "tag")
-        self.container_id = self.start_container(self.image)
-        print(self.check_container_status(self.container_id))
-        """
 
     def check_image_integrity(self):
         current_images = []
@@ -115,18 +113,12 @@ class OrchestrationManager:
         print(f"Built image: {image}")
 
     def _log_watcher_thread(self, container_name, faas_name, ready_signal):
-        """
-        Überwacht die Konsole des Containers auf ein spezifisches Signal.
-        """
         print(f"🔍 [Log-Watcher] Suche in {container_name} nach: '{ready_signal}'")
         try:
             container = self.client.containers.get(container_name)
-            # stream=True hält die Verbindung offen und liest jede neue Zeile
             log_stream = container.logs(stream=True, follow=True)
 
             for line in log_stream:
-                print(f"✨ [Log-Watcher]")
-                print(line)
                 if ready_signal in line.decode('utf-8'):
                     print(f"✨ [Log-Watcher] Signal '{ready_signal}' gefunden!")
                     self.append_updated_faas_containers(faas_name)
@@ -134,14 +126,12 @@ class OrchestrationManager:
         except Exception as e:
             print(f"❌ [Log-Watcher] Fehler: {e}")
 
-    def start_faas_container(self, faas_name: str, router_container_name: str, **run_kwargs):
+    def start_faas_container(self, faas_name: str, router_container_name: str,  **run_kwargs):
         uuid_for_faas = uuid.uuid4()
         container_name = f"FAAS-{uuid_for_faas}-container"
 
-        # Das Signal, das dein Service ausgibt, wenn er bereit ist (z.B. Flask oder FastAPI Standard)
         READY_SIGNAL = "running on"
 
-        # 1. Container starten (Wir starten erst, damit der Log-Stream ein Ziel hat)
         print(f"🚀 Starte FaaS-Container: {container_name}")
         try:
             image_tag = self.get_image_tags(faas_name)[0]
@@ -155,8 +145,6 @@ class OrchestrationManager:
             print(f"❌ Start-Fehler: {e}")
             return None
 
-        # 2. Log-Watcher Thread starten
-        # Wir starten ihn direkt nach dem Run-Befehl
         watcher_thread = threading.Thread(
             target=self._log_watcher_thread,
             args=(container_name, faas_name, READY_SIGNAL),
@@ -164,14 +152,9 @@ class OrchestrationManager:
         )
         watcher_thread.start()
 
-        # 3. Netzwerk-Setup
         try:
-            # Netzwerk erstellen
-            faas_network = self.create_network(uuid_for_faas)
-
-            # Container mit dem neuen Netzwerk verbinden
+            faas_network = self.get_router_network(router_container_name)
             faas_network.connect(faas_container)
-
         except Exception as e:
             print(f"❌ Netzwerk-Fehler: {e}")
 
@@ -210,8 +193,6 @@ class OrchestrationManager:
             ]
         }
         url = f"http://{self.ENVOY_XDS_ADDRESS}/cluster"
-        print(self.build_faas_cluster_append_payload(faas_name))
-        print(test)
         try:
             response = requests.put(url, json=self.build_faas_cluster_append_payload(faas_name))
             response.raise_for_status()
@@ -238,10 +219,11 @@ class OrchestrationManager:
         return {
             "name": faas_cluster_name,
             "base-routes": prio_0_dict,
-            "fallback-routes": prio_1_dict
+            "fallback-routes": prio_1_dict,
+            "replace": True
         }
 
-    def create_network(self, container_id):
+    def get_router_network(self, router_id: str):
         network = self.client.networks.get(
             "msadockerizedfaas_faas-net"
         )
@@ -250,11 +232,8 @@ class OrchestrationManager:
     def get_image_tags(self, repo_name: str):
         found_tags = []
         all_images = self.client.images.list()
-        print(f"Found {len(all_images)} images")
         for img in all_images:
-            print(img.tags)
             for tag in img.tags:
-                print(tag.split(":")[0])
                 if tag.split(":")[0] == repo_name:
                     found_tags.append(tag)
 
@@ -263,21 +242,18 @@ class OrchestrationManager:
     def stop_and_remove_container(self, container_id: str):
         self.change_health_of_faas_in_cluster(container_id, "draining")
 
-        print("HAHHSHHSH")
-        print(self.active_containers_dict)
-        print(container_id)
-
         uuid_only = container_id.split("FAAS-")[1].split('-container')[0]
 
         target_cluster = None
 
-        # .items() ist zwingend erforderlich!
         for cluster_name, container_list in self.active_containers_dict.items():
             if uuid_only in container_list:
                 target_cluster = cluster_name
                 container_list.remove(uuid_only)
                 print(f"✅ {uuid_only} aus Cluster '{cluster_name}' entfernt.")
                 break
+
+        print("Derzeit aktive Cluster und Container: ", self.active_containers_dict)
 
         self.append_updated_faas_containers(target_cluster)
 
@@ -291,13 +267,6 @@ class OrchestrationManager:
             print(f"Container {container_id} not found, nothing to do.")
         except docker.errors.APIError as e:
             print(f"Docker API error while removing container: {e}")
-
-    def check_container_status(self, container_id):
-        container = self.client.containers.get(container_id=container_id)
-        container.status
-        stats = container.stats(stream=False)
-
-        return stats.keys()
 
     def clear_deprecated_images(self, deprecated_images: list):
         for image_name in deprecated_images:

@@ -12,7 +12,7 @@ WEBHOOK_URL = os.getenv("WEBHOOK_URL", "http://webhook:5000/alert")
 
 # Regex to capture the gauge value
 # Example metric: envoy.cluster.service_cluster.upstream_rq_pending_active:5|g
-PATTERN = re.compile(r"cluster\.service_cluster\.upstream_rq_pending_active:(\d+)\|g")
+PATTERN = re.compile(r".*\.upstream_rq_pending_active:(\d+)\|g")
 
 def start_listener():
     # Create UDP socket
@@ -28,16 +28,17 @@ def start_listener():
             data, addr = sock.recvfrom(4096)
             message = data.decode("utf-8")
 
-            print("--------------------------------------------------")
-            print(f"📦 Received Packet from {addr}:")
-            print(message)
-            print("--------------------------------------------------")
+            #print("--------------------------------------------------")
+            #print(f"📦 Received Packet from {addr}:")
+            #print(message)
+            #print("--------------------------------------------------")
 
             # 2. Parse Lines (StatsD sends multiple metrics separated by \n)
             for line in message.splitlines():
                 match = PATTERN.search(line)
                 if match:
                     queue_size = int(match.group(1))
+                    print("Size: ", queue_size)
 
                     # 3. Trigger Logic
                     if queue_size > 0:

@@ -1,7 +1,7 @@
 usable-functions:
   hello:
     name: "hello"
-    version: 1.6
+    version: 2.2
     configuration:
       programing_language: "python"
       base_function_file_name: "hello.py"
