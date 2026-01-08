@@ -18,6 +18,5 @@ WORKDIR /app
 
 COPY --from=builder /usr/local /usr/local
 COPY ./orchestration/*.py ./
-COPY ./../faasRuntime/global-function-definition.yml ./
 
 CMD ["python", "-u", "main.py"]
