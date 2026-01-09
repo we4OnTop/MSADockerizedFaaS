@@ -34,26 +34,20 @@ import (
 	accesslogv3 "github.com/envoyproxy/go-control-plane/envoy/service/accesslog/v3"
 )
 
-const (
-	GrpcAddressEnv = "0.0.0.0:50051"
-	NodeIDEnv      = "local_node"
-	RestPortEnv    = "8081"
-	RedisAddrEnv   = "redis-messanger:6379"
-	rcs            = "redis-messanger:6379"
-)
-
 func main() {
-	//GrpcAddressEnv := os.Getenv("GRPC_ADDRESS")
-	//NodeIDEnv := os.Getenv("NODE_ID")
-	//RestPortEnv := os.Getenv("REST_PORT")
-	//RestPortEnv := os.Getenv("REST_PORT")
-	//RedisAddrENV := os.Getenv("REDIS_ADDR")
-	AddFaasRedisTopic := os.Getenv("TRACKING_FAAS_REDIS_TOPIC")
-	//RemoveFaasRedisTopic := os.Getenv("REMOVE_FAAS_REDIS_TOPIC")
+    GrpcAddressEnv := getEnv("GRPC_ADDRESS", "0.0.0.0:50051")
+	NodeIDEnv      := getEnv("NODE_ID", "local_node")
+	RestPortEnv    := getEnv("REST_PORT", "8081")
+	rcs   := getEnv("REDIS_ADDR", "redis-messanger:6379")
 
-	log.Printf("RestPortEnv: %v", RestPortEnv)
-	log.Printf("RedisAddrENV: %v", RedisAddrEnv)
-	log.Printf("AddFaasRedisTopic: %v", AddFaasRedisTopic)
+	//Log results to verify
+	log.Printf("--------------------------------")
+	log.Printf("Config Loaded:")
+	log.Printf("GRPC Address:  %s", GrpcAddressEnv)
+	log.Printf("Node ID:       %s", NodeIDEnv)
+	log.Printf("REST Port:     %s", RestPortEnv)
+	log.Printf("Redis Addr:    %s", rcs)
+	log.Printf("--------------------------------")
 
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 
@@ -114,6 +108,13 @@ func main() {
 	if err := grpcServer.Serve(lis); err != nil {
 		log.Fatalf("gRPC server exited: %v", err)
 	}
+}
+
+func getEnv(key, fallback string) string {
+	if value, exists := os.LookupEnv(key); exists {
+		return value
+	}
+	return fallback
 }
 
 // Gin REST Server
