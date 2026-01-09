@@ -8,19 +8,22 @@ import sys
 UDP_IP = "0.0.0.0" # Must be 0.0.0.0 to listen inside Docker
 UDP_PORT = 8125
 # This hostname 'webhook' matches the service name in docker-compose
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "http://webhook:5000/alert")
+REDIS_MESSANGER_URL = os.getenv("REDIS_MESSANGER_URL", "http://redis-messanger:5000")
+TO_IGNORE_CLUSTERS = ['xds_cluster', 'jaeger']
 
 # Regex to capture the gauge value
 # Example metric: envoy.cluster.service_cluster.upstream_rq_pending_active:5|g
-PATTERN = re.compile(r".*\.upstream_rq_pending_active:(\d+)\|g")
+PATTERN = re.compile(r"envoy\.cluster\.(?P<cluster_name>.*?)\.upstream_rq_pending_active:(?P<value>\d+)\|g")
+
 
 def start_listener():
+    LAST_UNIQUE_VALUE = 0
     # Create UDP socket
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind((UDP_IP, UDP_PORT))
 
     print(f"✅ StatsD Trigger listening on UDP {UDP_IP}:{UDP_PORT}")
-    print(f"   Target Webhook: {WEBHOOK_URL}")
+    print(f"   Target Webhook: {REDIS_MESSANGER_URL}")
 
     while True:
         try:
@@ -28,31 +31,26 @@ def start_listener():
             data, addr = sock.recvfrom(4096)
             message = data.decode("utf-8")
 
-            #print("--------------------------------------------------")
-            #print(f"📦 Received Packet from {addr}:")
-            #print(message)
-            #print("--------------------------------------------------")
-
             # 2. Parse Lines (StatsD sends multiple metrics separated by \n)
             for line in message.splitlines():
                 match = PATTERN.search(line)
                 if match:
-                    queue_size = int(match.group(1))
-                    print("Size: ", queue_size)
+                    cluster_name = match.group("cluster_name")
+                    if cluster_name in TO_IGNORE_CLUSTERS:
+                        pass
 
-                    # 3. Trigger Logic
-                    if queue_size > 0:
-                        print(f"🚨 QUEUE ALERT! Size: {queue_size} | Firing Webhook...")
-                        try:
-                            requests.post(WEBHOOK_URL, json={
-                                "alert": "Queue Spike",
-                                "queue_size": queue_size
-                            }, timeout=1.0)
-                        except Exception as e:
-                            print(f"❌ Webhook failed: {e}")
+                    queue_size = int(match.group("value"))
+
+                    print("START Size: ", queue_size)
+
+                    if LAST_UNIQUE_VALUE != queue_size and LAST_UNIQUE_VALUE < queue_size:
+                        print("Size: ", queue_size)
+                        print(line)
+                        LAST_UNIQUE_VALUE = queue_size
+                        requests.post(f"{REDIS_MESSANGER_URL}/pushFAASIncrement", json={
+                            "function-name": cluster_name,
+                        })
                     else:
-                        # Optional: Print heartbeat for empty queue
-                        # print(f"Queue is clean: {queue_size}")
                         pass
 
         except Exception as e:

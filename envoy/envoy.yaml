@@ -1,7 +1,7 @@
 node:
   id: local_node
 
-stats_flush_interval: 20.5s  # Push every 500ms
+stats_flush_interval: 0.3s  # Push every 500ms
 stats_sinks:
   - name: envoy.stat_sinks.statsd
     typed_config:
@@ -9,7 +9,7 @@ stats_sinks:
       address:
         socket_address:
           protocol: UDP
-          address: 127.0.0.1 # Matches docker-compose service name
+          address: 0.0.0.0 # Matches docker-compose service name
           port_value: 8125
       prefix: "envoy"
 

@@ -7,5 +7,6 @@ requires-python = ">=3.14"
 dependencies = [
     "starlette>=0.50.0",
     "uvicorn[standard]>=0.38.0",
-    "httptools>=0.7.1"
+    "httptools>=0.7.1",
+    "redis>=7.1.0",
 ]

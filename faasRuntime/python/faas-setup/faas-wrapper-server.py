@@ -1,9 +1,29 @@
 import importlib.util
 import os
+from contextlib import asynccontextmanager
+import redis.asyncio as redis
+
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse
 from starlette.requests import Request
 from starlette.routing import Route
+
+redis_client = None
+CONTAINER_NAME = None
+
+@asynccontextmanager
+async def lifespan(app):
+    global redis_client
+    global CONTAINER_NAME
+    CONTAINER_NAME = os.environ["CONTAINER_NAME"]
+    redis_host = os.environ.get("REDIS_HOST", "localhost")
+    redis_client = redis.Redis(host=redis_host, port=6379, db=0, decode_responses=True)
+    print("Redis Pool Connected")
+
+    yield
+
+    await redis_client.aclose()
+    print("Redis Pool Closed")
 
 def load_handler_data():
     HANDLER_DIR = os.environ['HANDLER_DIR']
@@ -15,7 +35,7 @@ def load_handler_data():
     spec.loader.exec_module(module)
     return {
         "handler": module.handle,
-        "config": module.handler_run_config # This expects a dict variable
+        "config": module.handler_run_config
     }
 
 BASE_HANDLER_FUNCTION = load_handler_data()
@@ -25,23 +45,36 @@ async def invoke_function(request: Request):
         config = BASE_HANDLER_FUNCTION['config']
         result = await BASE_HANDLER_FUNCTION['handler'](request)
 
-        # If the handler says it returns a pre-made Response object
         if config.get('is_return_serialized', False):
             return result
         else:
-            # Otherwise, wrap the raw data in JSON
             return JSONResponse(result)
 
     except Exception as e:
-        print(f"Error: {e}") # Helpful to print the actual error to logs
-        # FIX: Use a dictionary or list, NOT a set {"String"}
+        print(f"Error: {e}")
         return JSONResponse(
             {"error": "Internal error while executing function, try again later..."},
             status_code=500
         )
 
+async def endpoint_wrapper(request: Request):
+    try:
+        faas_name = os.environ.get("CONTAINER_NAME", "unknown-func")
+        print(faas_name)
+        async with redis_client.pipeline() as pipe:
+            await pipe.delete(f"{faas_name}:timer")
+            await pipe.incr(f"{faas_name}:{faas_name}")
+            await pipe.execute()
+
+    except Exception as e:
+        print(f"Redis Error: {e}")
+
+    response = await invoke_function(request)
+
+    return response
+
 routes = [
-    Route("/", endpoint=invoke_function, methods=["GET", "POST"]), # Added methods to be safe
+    Route("/", endpoint=endpoint_wrapper, methods=["GET", "POST"]),
 ]
 
-app = Starlette(routes=routes)
+app = Starlette(routes=routes, lifespan=lifespan)

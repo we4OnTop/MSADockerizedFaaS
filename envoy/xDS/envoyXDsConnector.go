@@ -189,11 +189,28 @@ func createCluster(clusterName string, discoveryType clusterv3.Cluster_Discovery
 			},
 		},
 		CircuitBreakers: &clusterv3.CircuitBreakers{
+			// 1. GLOBALE EINSTELLUNGEN ("Der Türsteher & Der Warteraum")
+			// Damit die Queue anspringt, muss Envoy hier denken: "Der Laden ist voll."
 			Thresholds: []*clusterv3.CircuitBreakers_Thresholds{{
-				Priority:           corev3.RoutingPriority_DEFAULT,
-				MaxConnections:     wrapperspb.UInt32(10),
-				MaxRequests:        wrapperspb.UInt32(10),
-				MaxPendingRequests: wrapperspb.UInt32(50000),
+				Priority: corev3.RoutingPriority_DEFAULT,
+
+				// HIER MUSST DU RECHNEN: Anzahl Endpoints * 2
+				// Beispiel: Bei 10 Endpoints setzt du das hier auf 20.
+				// Sobald der 21. Request kommt, greift die Queue unten.
+				MaxConnections: wrapperspb.UInt32(2),
+				MaxRequests:    wrapperspb.UInt32(2), // Wichtig für HTTP/2 oder gRPC
+				// DIE QUEUE ("Der Warteraum")
+				// Hier warten alle Requests, die nicht durch das Limit oben passen.
+				MaxPendingRequests: wrapperspb.UInt32(10000),
+			}},
+
+			// 2. PRO ENDPUNKT EINSTELLUNGEN ("Der Sitzplatz")
+			// Das stellt sicher, dass auch wirklich kein einzelner Server mehr als 2 bekommt.
+			PerHostThresholds: []*clusterv3.CircuitBreakers_Thresholds{{
+				Priority: corev3.RoutingPriority_DEFAULT,
+
+				// Das harte Limit pro IP
+				MaxConnections: wrapperspb.UInt32(2),
 			}},
 		},
 		TypedExtensionProtocolOptions: map[string]*anypb.Any{
@@ -516,7 +533,8 @@ func createListener(
 			},
 		},
 		// Optional: Zusätzliche Header, die im Log erscheinen sollen
-		AdditionalRequestHeadersToLog: []string{"x-request-id", "x-faas-container-id"},
+		AdditionalRequestHeadersToLog:  []string{"x-request-id", "x-faas-container-id"},
+		AdditionalResponseHeadersToLog: []string{"content-type", "x-response-duration", "my-custom-header"},
 	}
 
 	// Verpacken in "Any"
@@ -665,6 +683,7 @@ func createRouteComponent(prefix string, routeToCluster string, regexRewrite *Re
 			Cluster: routeToCluster,
 		},
 		RetryPolicy: retryPolicy, // Policy wird hier für beide Fälle zugewiesen
+		Timeout:     durationpb.New(300 * time.Second),
 	}
 
 	// Falls Rewrite-Logik benötigt wird, hinzufügen

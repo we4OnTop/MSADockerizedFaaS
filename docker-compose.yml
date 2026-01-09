@@ -104,8 +104,10 @@ services:
       context: ./statsdListener/
       dockerfile: Dockerfile
     environment:
-      - WEBHOOK_URL=http://webhook:5000/alert
-    network_mode: service:envoy
+      - REDIS_MESSANGER_URL=http://redis-rest-pusher:7071
+    networks:
+      - layers-messaging-net
+      - proxy-net
 
   redis:
     image: redis:alpine
@@ -116,6 +118,7 @@ services:
     networks:
       - layers-messaging-net
       - managing-net
+      - faas-net
 
   redis-rest-pusher:
     build:
