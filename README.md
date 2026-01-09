@@ -33,8 +33,9 @@ All in all a little bit complicated but needed to enable the whole load scaling.
 
 1. Start the Application
 
-   > docker compose up
-
+    ```bash
+   docker compose up
+   ```
 
 2.  Go into the `orchestration`-container and only if he is ready continue!
 
@@ -62,8 +63,10 @@ Note: Some of the AI & Language Services are implemented but may cause timeouts 
 
 1. Create new folder in `faasRuntime/python/functions` with an unique name
 
-   > cd /faasRuntime/python/functions
-
+   ```bash
+   cd faasRuntime/python/functions
+   ```
+2. 
 2. Use the template defined inside of `faasRuntime/template.txt` and create an Python file inside the folder, named by your choise.
 3. Define your function that should be executed
 4. Go into the schema file found under `faasRuntime/global-function-definition.yml` where you need to register your function with the following parameters:
@@ -77,9 +80,6 @@ Note: Some of the AI & Language Services are implemented but may cause timeouts 
          function_folder: "example"
          extra_dependencies: ""
    ```
-
-
-
 
 
 ## Note:
