@@ -33,20 +33,26 @@ All in all a little bit complicated but needed to enable the whole load scaling.
 
 1. Start the Application
    
-     > docker compose run
+     > docker compose up
 
 2. Send basic request
 
-    > curl http://localhost:8080/hello
+    > click on  http://localhost:8080/hello
 
 3. You should see how a container is started to work on your request and if no other request accures in 10 seconds its destroyed again.
 
 
-## Try some functions
+## Use predefined functions
+1. Switch to
+      > click on http://localhost:8080/dashboard
 
-To see that the whole application is scaling up and down, depending on the load we created a little script that lanuches multiple requests per secound to see the behavior.
+It should display the predefined functions.
 
+2. Use some of the Mathematical Services and AI & Language Services. Each Service start an Container and stops it after the service is not needed anymore. It should look like this:
 
+![Dashboard.png](Dashboard.png)
+
+Note: Some of the AI & Language Services are implemented but may cause timeouts due to performance limitations (long model loading times and limited CPU resources in the container).
 ## Create an own Function
 
 1. Create new folder in `faasRuntime/python/functions` with an unique name
@@ -74,7 +80,7 @@ To see that the whole application is scaling up and down, depending on the load 
 ## Note:
 
 - Some bugs could accure, we tested the pre defined functions and they should work hopefully :D
-- An restart and rebuild could fix an error if not contact us 
+- If an error accours, try to restart and rebuild the containers. It worked mostly for us.
 
 
 Hopefully you like it :)
