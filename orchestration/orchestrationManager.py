@@ -111,35 +111,29 @@ class OrchestrationManager:
     def build_image(self, context_path: str, dockerfile: str, function_name: str, version: str, buildargs: dict[str, str]):
         print(f"[{function_name}] Starting build...")
 
-        # Use the low-level API (client.api) to get a stream of logs
         response_stream = self.client.api.build(
             path=context_path,
             dockerfile=dockerfile,
             tag=f"{function_name}:{version}",
             buildargs=buildargs,
-            nocache=False,  # Keep this FALSE for speed!
-            rm=True,        # Remove intermediate containers
-            decode=True     # Decodes the JSON stream automatically
+            nocache=False,
+            rm=True,
+            decode=True
         )
 
+        # Print Build logs...
         for chunk in response_stream:
-            # 1. Catch Errors immediately
             if 'error' in chunk:
                 raise Exception(f"[{function_name}] Build Error: {chunk['error']}")
 
-            # 2. Print "Step" logs (e.g., "Step 1/5 : RUN pip install...")
             if 'stream' in chunk:
                 line = chunk['stream'].strip()
                 if line:
                     print(f"[FAAS-Image-building...][{function_name}] {line}")
 
-            # 3. Print Download Status (e.g., "Downloading", "Extracting")
-            # Note: We skip the detailed progress bar strings because they clutter the logs in multi-threading
             elif 'status' in chunk:
                 status = chunk['status']
-                # Only print major status updates to avoid spamming the console
                 if "Downloading" in status or "Extracting" in status:
-                    # Optional: Print ID if available (e.g., layer hash)
                     layer_id = chunk.get('id', '')
                     print(f"[{function_name}] Docker Layer {layer_id}: {status}")
 
@@ -149,14 +143,14 @@ class OrchestrationManager:
     def _log_watcher_thread(self, container_name, faas_name, ready_signal):
         r = redis.Redis(host=self.redis_host, port=6379, db=0)
 
-        print(f"[Log-Watcher] Suche in {container_name} nach: '{ready_signal}'")
+        print(f"[Log-Watcher] Searching in {container_name} for: '{ready_signal}'")
         try:
             container = self.client.containers.get(container_name)
             log_stream = container.logs(stream=True, follow=True)
 
             for line in log_stream:
                 if ready_signal in line.decode('utf-8'):
-                    print(f"[Log-Watcher] Signal '{ready_signal}' gefunden!")
+                    print(f"[Log-Watcher] Signal '{ready_signal}' ´found!")
 
                     r.set(f"{container_name}:timer", 1, ex=30)
 
@@ -164,7 +158,7 @@ class OrchestrationManager:
                     break
 
         except Exception as e:
-            print(f"[Log-Watcher] Fehler: {e}")
+            print(f"[Log-Watcher] Error: {e}")
 
     def start_faas_container(self, faas_name: str, router_container_name: str,  **run_kwargs):
         uuid_for_faas = uuid.uuid4()
@@ -177,7 +171,7 @@ class OrchestrationManager:
             "REDIS_HOST": self.redis_host
         }
 
-        print(f"🚀 Starte FaaS-Container: {container_name}")
+        print(f"Starte FaaS-Container: {container_name}")
         try:
             image_tag = self.get_image_tags(faas_name)[0]
             faas_container = self.client.containers.run(
@@ -188,7 +182,7 @@ class OrchestrationManager:
                 **run_kwargs
             )
         except Exception as e:
-            print(f"❌ Start-Fehler: {e}")
+            print(f"Start error: {e}")
             return None
 
         watcher_thread = threading.Thread(
@@ -202,7 +196,7 @@ class OrchestrationManager:
             faas_network = self.get_router_network(router_container_name)
             faas_network.connect(faas_container)
         except Exception as e:
-            print(f"❌ Netzwerk-Fehler: {e}")
+            print(f"Network error: {e}")
 
         if faas_name in self.active_containers_dict:
             self.active_containers_dict[faas_name].append(f"{uuid_for_faas}")
@@ -255,6 +249,7 @@ class OrchestrationManager:
             {"address": f"FAAS-{addr}-container", "port": int(5000)}
             for addr in priority_0_containers
         ]
+        # Tried to add loop if no endpoint in cluster but worked decent
         prio_1_dict = [
             #{"address": "envoy", "port": 10000}
         ]
@@ -293,10 +288,8 @@ class OrchestrationManager:
             if uuid_only in container_list:
                 target_cluster = cluster_name
                 container_list.remove(uuid_only)
-                print(f"✅ {uuid_only} aus Cluster '{cluster_name}' entfernt.")
+                print(f"{uuid_only} from cluster '{cluster_name}' removed.")
                 break
-
-        print("Derzeit aktive Cluster und Container: ", self.active_containers_dict)
 
         self.append_updated_faas_containers(target_cluster)
 
@@ -417,21 +410,6 @@ class OrchestrationManager:
         except Exception as e:
             print(f"Request failed: {e}")
 
-
-
-#"""
-#{
-#  "count": 1,
-#  "listeners": {
-#    "listener_0": [
-#      "hello"
-#    ]
-#  }
-#}
-#"""
-
-
-
     @staticmethod
     def create_listener_payload(routes):
         return {
@@ -463,34 +441,3 @@ class OrchestrationManager:
             }
 
         return route
-
-"""
-        POST
-        http: // localhost: 8081 / listener
-        Content - Type: application / json
-
-        {
-            "routes": [
-                {
-                    "prefix": "/hello",
-                    "cluster_to_use": "hello",
-                    "virtual_host": "local_service",
-                    "regex_rewrite": {
-                        "regex": ".*",
-                        "substitution": "/"
-                    }
-                }
-            ],
-            "virtualHosts": [
-                {
-                    "name": "local_service",
-                    "domains": ["*"]
-                }
-            ],
-            "listenerConfiguration": {
-                "listener_name": "listener_0",
-                "listener_address": "0.0.0.0",
-                "listener_port": 10000
-            }
-        }
-"""

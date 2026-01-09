@@ -27,6 +27,6 @@ COPY --from=builder /app/envoyXDsConnector /envoyXDsConnector
 
 USER nonroot:nonroot
 
-#ENV GIN_MODE=release
+ENV GIN_MODE=release
 
 ENTRYPOINT ["/envoyXDsConnector"]

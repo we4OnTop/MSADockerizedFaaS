@@ -39,6 +39,7 @@ const (
 	NodeIDEnv      = "local_node"
 	RestPortEnv    = "8081"
 	RedisAddrEnv   = "redis-messanger:6379"
+	rcs            = "redis-messanger:6379"
 )
 
 func main() {
@@ -71,8 +72,6 @@ func main() {
 	routeservice.RegisterRouteDiscoveryServiceServer(grpcServer, srv)
 	listenerservice.RegisterListenerDiscoveryServiceServer(grpcServer, srv)
 
-	log.Println("✅ Access Log Service (ALS) registriert.")
-
 	// Start gRPC Server
 	lis, err := net.Listen("tcp", GrpcAddressEnv)
 	if err != nil {
@@ -92,12 +91,12 @@ func main() {
 			time.Sleep(5 * time.Second)
 		}
 	}()
-	test := "redis-messanger:6379"
-	print("HSDHhSDHDS ", test)
+
 	rdb := redis.NewClient(&redis.Options{
-		Addr: test,
+		Addr: rcs,
 	})
-	// 2. Test Connection (Ping)
+
+	// Test connection redis
 	pong, err := rdb.Ping(ctx).Result()
 	if err != nil {
 		fmt.Println("Could not connect to Redis:", err)
@@ -108,8 +107,8 @@ func main() {
 		RedisClient: rdb,
 	}
 
-	// Registrieren
 	accesslogv3.RegisterAccessLogServiceServer(grpcServer, alsService)
+	log.Println("Access Log Service (ALS) registered.")
 
 	log.Printf("Envoy Control Plane running on gRPC %s", GrpcAddressEnv)
 	if err := grpcServer.Serve(lis); err != nil {
@@ -161,6 +160,7 @@ type AccessLogService struct {
 	RedisClient *redis.Client
 }
 
+// Push response information in redis
 func (s *AccessLogService) StreamAccessLogs(stream accesslogv3.AccessLogService_StreamAccessLogsServer) error {
 	for {
 		msg, err := stream.Recv()
@@ -168,11 +168,9 @@ func (s *AccessLogService) StreamAccessLogs(stream accesslogv3.AccessLogService_
 			return err
 		}
 
-		// Getter nutzen!
 		if httpLogs := msg.GetHttpLogs(); httpLogs != nil {
 			for _, entry := range httpLogs.LogEntry {
 
-				// --- 1. Request Info & Status ---
 				statusCode := uint32(0)
 				if entry.Response != nil && entry.Response.ResponseCode != nil {
 					statusCode = entry.Response.ResponseCode.Value
@@ -185,16 +183,13 @@ func (s *AccessLogService) StreamAccessLogs(stream accesslogv3.AccessLogService_
 					}
 				}
 
-				// --- 2. Endpoint Metadata (Wo ging der Request hin?) ---
 				upstreamCluster := "unknown"
 				upstreamAddress := "unknown"
 				upstreamPort := uint32(0)
 
 				if common := entry.CommonProperties; common != nil {
-					// Cluster Name (z.B. "faas_function_1")
 					upstreamCluster = common.UpstreamCluster
 
-					// Die IP und der Port des Containers, der den Job erledigt hat
 					if remoteAddr := common.UpstreamRemoteAddress; remoteAddr != nil {
 						if socketAddr := remoteAddr.GetSocketAddress(); socketAddr != nil {
 							upstreamAddress = fmt.Sprintf("%s:%d", socketAddr.Address, socketAddr.GetPortValue())
@@ -203,46 +198,19 @@ func (s *AccessLogService) StreamAccessLogs(stream accesslogv3.AccessLogService_
 					}
 				}
 				faasName := getEndpointMetadata(upstreamCluster, upstreamPort)
-				// --- 3. Ausgabe ---
-				log.Printf("🚀 gRPC Log: Cluster=%s | Endpoint=%s | Status=%d | ReqID=%s",
+
+				log.Printf("gRPC Log: Cluster=%s | Endpoint=%s | Status=%d | ReqID=%s",
 					upstreamCluster, upstreamAddress, statusCode, reqID)
 
 				if s.RedisClient != nil {
 					ctx := context.Background()
 					if faasName != "not-found" {
-						// Your existing logic
-						log.Printf("Using FAAS Name %s", faasName)
-						//s.RedisClient.Incr(ctx, faasName+":"+faasName) // Added 0 for no expiration on this key
-						val, err := s.RedisClient.Get(ctx, faasName+":"+faasName).Int()
 
-						// Falls der Key nicht existiert (Redis gibt Fehler), bedeutet das 0 aktive Requests
-						if err != nil {
-							val = 0
-						}
-
-						if val-1 == 0 {
-							s.RedisClient.Incr(ctx, faasName+":timer")
-							s.RedisClient.Expire(ctx, faasName+":timer", 10*time.Second)
-						}
-
-						s.RedisClient.Decr(ctx, faasName+":"+faasName)
-
-						// New: Publish to a channel named after the faasName
-						channel := faasName + "/events"
-						payload := "updated"
-
-						// Publish returns the number of subscribers that received the message
-						subscribers, err := s.RedisClient.Publish(ctx, channel, payload).Result()
-						if err != nil {
-							log.Printf("redis publish error: %v", err)
-						}
-
-						_ = subscribers // Useful if you want to verify someone is listening
+						s.RedisClient.Set(ctx, faasName+":"+faasName, 1, 0) // Added 0 for no expiration on this key
+						s.RedisClient.Incr(ctx, faasName+":timer")
+						s.RedisClient.Expire(ctx, faasName+":timer", 10*time.Second)
 					}
 				}
-
-				// TIPP: Da du hier im Go-Code bist, kannst du jetzt anhand der 'upstreamAddress'
-				// in deinem Cache nachschauen, welche Container-ID das war, falls du sie brauchst!
 			}
 		}
 	}
@@ -357,19 +325,16 @@ func setupClusterRoutes(r *gin.Engine, snapshotCache cache.SnapshotCache, ctx co
 	})
 
 	r.PUT("/cluster", func(c *gin.Context) {
-		println("HALLO ICH BIN DRINN ABER")
 		var input ClusterReplace
 
 		if err := c.ShouldBindJSON(&input); err != nil {
 			c.JSON(400, gin.H{"error": err.Error()})
 			return
 		}
-		log.Println("INIPOUTI")
-		log.Println(input)
+
 		var baseRoutes []Route = input.BaseRoutes
 		var fallbackRoutes []Route = input.FallbackRoutes
-		log.Println(baseRoutes)
-		log.Println(fallbackRoutes)
+
 		var foundCluster *clusterv3.Cluster
 		for _, cluster := range CurrentClusters {
 			if cluster.Name == input.Name {
@@ -380,11 +345,9 @@ func setupClusterRoutes(r *gin.Engine, snapshotCache cache.SnapshotCache, ctx co
 
 		if foundCluster != nil {
 			removeCluster(foundCluster.Name)
-			log.Println(foundCluster, "NAJHA2323233")
 			if input.Replace && (len(baseRoutes) > 0 || len(fallbackRoutes) > 0) {
 				replaceRoutesOnCluster(foundCluster, baseRoutes, fallbackRoutes)
 			} else {
-				log.Println(foundCluster, "NAJHA")
 				appendRoutesToCluster(foundCluster, baseRoutes, fallbackRoutes)
 			}
 
@@ -550,16 +513,14 @@ func generateSnapshot(version string) (*cache.Snapshot, error) {
 		},
 	}
 
-	// ... inside the VirtualHost section ...
-
 	// Route Configuration
-	// 1. Create the empty Router configuration
+	// Create the empty Router configuration
 	routerConfig, err := anypb.New(&routerv3.Router{})
 	if err != nil {
 		return nil, err
 	}
 
-	// 2. Use it in the HTTP Connection Manager
+	// Use it in the HTTP Connection Manager
 	hcmConfig := &hcm.HttpConnectionManager{
 		StatPrefix: "ingress_http",
 		RouteSpecifier: &hcm.HttpConnectionManager_RouteConfig{
@@ -577,17 +538,13 @@ func generateSnapshot(version string) (*cache.Snapshot, error) {
 								ClusterSpecifier: &routev3.RouteAction_Cluster{
 									Cluster: "example_backend",
 								},
-								// REMOVE the HostRewriteSpecifier (Delete the lines below)
-								// HostRewriteSpecifier: &routev3.RouteAction_HostRewriteLiteral{
-								//    HostRewriteLiteral: "example.com",
-								// },
 							},
 						},
 					}},
 				}},
 			},
 		},
-		// --- THE FIX IS HERE ---
+
 		HttpFilters: []*hcm.HttpFilter{
 			{
 				Name: wellknown.Router,
@@ -633,6 +590,5 @@ func generateSnapshot(version string) (*cache.Snapshot, error) {
 		return nil, fmt.Errorf("failed to create snapshot: %v", err)
 	}
 
-	// We return a pointer to the snapshot
 	return snap, nil
 }

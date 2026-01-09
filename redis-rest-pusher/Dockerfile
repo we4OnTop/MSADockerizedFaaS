@@ -7,7 +7,7 @@ COPY ./go.sum ./
 RUN go mod download
 
 #Copy source
-COPY ./mqttEasierPublishREST ./
+COPY ./redis-rest-pusher ./
 
 #Build binaries
 RUN CGO_ENABLED=0 GOOS=linux go build \

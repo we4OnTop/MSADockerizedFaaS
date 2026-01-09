@@ -1,14 +1,14 @@
 services:
-  jaeger:
-    image: jaegertracing/all-in-one:latest
-    environment:
-      # 1. ADD THIS to enable Port 9411
-      - COLLECTOR_ZIPKIN_HOST_PORT=:9411
-    ports:
-      - "16686:16686" # The UI
-      - "9411:9411"   # Zipkin Protocol Port (Envoy uses this)
-    networks:
-      - monitor-net
+  #jaeger:
+  #  image: jaegertracing/all-in-one:latest
+  #  environment:
+  #    # 1. ADD THIS to enable Port 9411
+  #    - COLLECTOR_ZIPKIN_HOST_PORT=:9411
+  #  ports:
+  #    - "16686:16686" # The UI
+  #    - "9411:9411"   # Zipkin Protocol Port (Envoy uses this)
+  #  networks:
+  #    - monitor-net
   xds_connector:
     build:
       context: .
@@ -42,29 +42,6 @@ services:
     depends_on:
       - envoy
 
-  prometheus:
-    image: prom/prometheus:latest
-    ports:
-      - "9090:9090"
-    volumes:
-      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.ym
-    depends_on:
-      - envoy
-      - cadvisor
-
-  cadvisor:
-    image: gcr.io/cadvisor/cadvisor:latest
-    container_name: cadvisor
-    ports:
-      - "7080:8080"
-    volumes:
-      - /:/rootfs:ro
-      - /var/run:/var/run:rw
-      - /sys:/sys:ro
-      - /var/lib/docker/:/var/lib/docker:ro
-    depends_on:
-      - envoy
-
   envoy:
     build:
       context: .
@@ -82,22 +59,12 @@ services:
       - proxy-net
       - faas-net
       - monitor-net
+      - layers-messaging-net
     environment:
       - REDIS_ADDR=redis-messanger:6379
       - TRACKER_FAAS_REDIS_TOPIC=FAASTracker
     depends_on:
       - redis
-      - jaeger
-
-  python-watcher:
-    build:
-      context: ./testwatcher/
-      dockerfile: Dockerfile
-    volumes:
-      - shared-logs:/shared/logs
-      - /var/run/docker.sock:/var/run/docker.sock
-    networks:
-      - proxy-net
 
   statsd-listener:
     build:
@@ -105,9 +72,7 @@ services:
       dockerfile: Dockerfile
     environment:
       - REDIS_MESSANGER_URL=http://redis-rest-pusher:7071
-    networks:
-      - layers-messaging-net
-      - proxy-net
+    network_mode: service:envoy
 
   redis:
     image: redis:alpine
@@ -123,7 +88,7 @@ services:
   redis-rest-pusher:
     build:
       context: .
-      dockerfile: ./mqttEasierPublishREST/Dockerfile
+      dockerfile: redis-rest-pusher/Dockerfile
     ports:
       - "7071:7071"
     environment:

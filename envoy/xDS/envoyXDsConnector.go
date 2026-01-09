@@ -13,7 +13,6 @@ import (
 
 	accesslogv3 "github.com/envoyproxy/go-control-plane/envoy/config/accesslog/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
-	tracev3 "github.com/envoyproxy/go-control-plane/envoy/config/trace/v3"
 	accessloggrpc "github.com/envoyproxy/go-control-plane/envoy/extensions/access_loggers/grpc/v3"
 	routerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/router/v3"
 	hcm "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
@@ -27,10 +26,9 @@ import (
 	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 
-	// Envoy Control Plane Core
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/v3"
-	// Resource Definitions
+
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
@@ -120,7 +118,6 @@ func toResources[T types.Resource](items []T) []types.Resource {
 }
 
 func updateSnapshot(snapshotCache cache.SnapshotCache, ctx context.Context) (*cache.Snapshot, error) {
-	// 1. Snapshot-Objekt erstellen
 	snap, err := cache.NewSnapshot(
 		fmt.Sprintf("v%d", snapshotNumber),
 		map[resource.Type][]types.Resource{
@@ -134,21 +131,13 @@ func updateSnapshot(snapshotCache cache.SnapshotCache, ctx context.Context) (*ca
 
 	NodeIDEnv := os.Getenv("NODE_ID")
 
-	// 2. Snapshot im Cache setzen (Pusht die Config an Envoy)
 	if err := snapshotCache.SetSnapshot(ctx, NodeIDEnv, snap); err != nil {
 		return nil, fmt.Errorf("failed to set snapshot: %v", err)
 	}
-
-	// --- Ab hier war der Push erfolgreich ---
-
-	// 3. Zähler erst nach Erfolg erhöhen
 	snapshotNumber++
 
-	// 4. Blockliste an Nginx/Gatekeeper pushen
-	// Da der Snapshot bereits gesetzt ist, ist dieser Schritt kritisch für die Synchronisation
+	// Update Nginx block list
 	if err := pushClusterBlockList(); err != nil {
-		// Wir loggen den Fehler, geben aber den Snapshot zurück,
-		// da Envoy die neuen Cluster bereits kennt.
 		log.Printf("CRITICAL: Snapshot set but failed to push blocklist: %v", err)
 		return snap, fmt.Errorf("snapshot active but blocklist sync failed: %v", err)
 	}
@@ -164,14 +153,11 @@ func createCluster(clusterName string, discoveryType clusterv3.Cluster_Discovery
 		},
 	}
 
-	//Converting the configuration to an anypb.Any Type
 	pbst, err := anypb.New(httpProtocolOptions)
 	if err != nil {
-		// Panic error
 		panic(err)
 	}
 
-	//Define an Cluster
 	cls := clusterv3.Cluster{
 		Name:                 clusterName,
 		ConnectTimeout:       durationpb.New(time.Second * 2),
@@ -189,27 +175,21 @@ func createCluster(clusterName string, discoveryType clusterv3.Cluster_Discovery
 			},
 		},
 		CircuitBreakers: &clusterv3.CircuitBreakers{
-			// 1. GLOBALE EINSTELLUNGEN ("Der Türsteher & Der Warteraum")
-			// Damit die Queue anspringt, muss Envoy hier denken: "Der Laden ist voll."
 			Thresholds: []*clusterv3.CircuitBreakers_Thresholds{{
 				Priority: corev3.RoutingPriority_DEFAULT,
 
-				// HIER MUSST DU RECHNEN: Anzahl Endpoints * 2
-				// Beispiel: Bei 10 Endpoints setzt du das hier auf 20.
-				// Sobald der 21. Request kommt, greift die Queue unten.
-				MaxConnections: wrapperspb.UInt32(2),
-				MaxRequests:    wrapperspb.UInt32(2), // Wichtig für HTTP/2 oder gRPC
-				// DIE QUEUE ("Der Warteraum")
-				// Hier warten alle Requests, die nicht durch das Limit oben passen.
+				//TODO: Here the problem with statsd scaling
+				MaxConnections: wrapperspb.UInt32(1024),
+
+				MaxRequests:        wrapperspb.UInt32(1024),
 				MaxPendingRequests: wrapperspb.UInt32(10000),
+				MaxRetries:         wrapperspb.UInt32(10),
 			}},
 
-			// 2. PRO ENDPUNKT EINSTELLUNGEN ("Der Sitzplatz")
-			// Das stellt sicher, dass auch wirklich kein einzelner Server mehr als 2 bekommt.
+			// 2. PRO ENDPUNKT EINSTELLUNGEN
 			PerHostThresholds: []*clusterv3.CircuitBreakers_Thresholds{{
 				Priority: corev3.RoutingPriority_DEFAULT,
 
-				// Das harte Limit pro IP
 				MaxConnections: wrapperspb.UInt32(2),
 			}},
 		},
@@ -243,13 +223,8 @@ func appendNewCluster(newCluster *clusterv3.Cluster) {
 
 func removeCluster(clusterName string) {
 	var newClusters []*clusterv3.Cluster
-	print("HAHAHHAHHAHDSHH")
-	print(CurrentClusters)
 	for _, c := range CurrentClusters {
-		print(c.Name)
-		print(c)
 		if c.Name != clusterName {
-			print("HAHAHHAHHAHDSHH22222222")
 			newClusters = append(newClusters, c)
 		}
 	}
@@ -264,31 +239,24 @@ type Route struct {
 }
 
 func replaceRoutesOnCluster(cls *clusterv3.Cluster, baseRoutes []Route, fallbackRoutes []Route) {
-
-	// 1. Sicherstellen, dass das Struct existiert und den Namen hat
 	if cls.LoadAssignment == nil {
 		cls.LoadAssignment = &endpointv3.ClusterLoadAssignment{
 			ClusterName: cls.Name,
 		}
 	} else {
-		// Falls es existiert, sicherstellen, dass der Name stimmt (optional, aber gut)
 		if cls.LoadAssignment.ClusterName == "" {
 			cls.LoadAssignment.ClusterName = cls.Name
 		}
 	}
 
-	// 2. WICHTIG: Statt das Objekt zu ersetzen, setzen wir nur die Endpoints auf leer zurück.
-	// Damit behalten wir den Pointer und den ClusterName.
 	cls.LoadAssignment.Endpoints = []*endpointv3.LocalityLbEndpoints{}
 
-	// Track existing priorities
 	existingPriorities := map[uint32]*endpointv3.LocalityLbEndpoints{}
 
 	// Helper to create or append to locality
 	addEndpoints := func(priority uint32, routes []Route) {
 		locality, ok := existingPriorities[priority]
 		if !ok {
-			// Create new locality
 			locality = &endpointv3.LocalityLbEndpoints{
 				Priority:    priority,
 				LbEndpoints: []*endpointv3.LbEndpoint{},
@@ -323,7 +291,6 @@ func hasHealthyEndpoints(routes []Route) bool {
 }
 
 func appendRoutesToCluster(cls *clusterv3.Cluster, baseRoutes []Route, fallbackRoutes []Route) {
-	// Ensure LoadAssignment exists
 	if cls.LoadAssignment == nil {
 		cls.LoadAssignment = &endpointv3.ClusterLoadAssignment{}
 	}
@@ -342,7 +309,6 @@ func appendRoutesToCluster(cls *clusterv3.Cluster, baseRoutes []Route, fallbackR
 	addEndpoints := func(priority uint32, routes []Route) {
 		locality, ok := existingPriorities[priority]
 		if !ok {
-			// Create new locality
 			locality = &endpointv3.LocalityLbEndpoints{
 				Priority:    priority,
 				LbEndpoints: []*endpointv3.LbEndpoint{},
@@ -503,18 +469,20 @@ func createListener(
 		return fmt.Errorf("failed to create router config: %v", err)
 	}
 
-	zipkinConfig := &tracev3.ZipkinConfig{
-		CollectorCluster:         "jaeger",        // Must match your cluster name
-		CollectorEndpoint:        "/api/v2/spans", // Standard Jaeger endpoint
-		TraceId_128Bit:           true,
-		CollectorEndpointVersion: tracev3.ZipkinConfig_HTTP_JSON,
-	}
-
-	// 2. Marshal it into an 'Any' protobuf message
-	zipkinTypedConfig, err := anypb.New(zipkinConfig)
-	if err != nil {
-		panic(err) // Handle error appropriately
-	}
+	// Jaeger config
+	//
+	//zipkinConfig := &tracev3.ZipkinConfig{
+	//	CollectorCluster:         "jaeger",
+	//	CollectorEndpoint:        "/api/v2/spans",
+	//	TraceId_128Bit:           true,
+	//	CollectorEndpointVersion: tracev3.ZipkinConfig_HTTP_JSON,
+	//}
+	//
+	// Marshal it into an 'Any' protobuf message
+	//zipkinTypedConfig, err := anypb.New(zipkinConfig)
+	//if err != nil {
+	//	panic(err)
+	//}
 
 	grpcAccessLogConfig := &accessloggrpc.HttpGrpcAccessLogConfig{
 		CommonConfig: &accessloggrpc.CommonGrpcAccessLogConfig{
@@ -558,14 +526,16 @@ func createListener(
 			},
 		},
 
-		Tracing: &hcm.HttpConnectionManager_Tracing{
-			Provider: &tracev3.Tracing_Http{
-				Name: "envoy.tracers.zipkin",
-				ConfigType: &tracev3.Tracing_Http_TypedConfig{
-					TypedConfig: zipkinTypedConfig,
-				},
-			},
-		},
+		// Jaeger config
+		//
+		//Tracing: &hcm.HttpConnectionManager_Tracing{
+		//	Provider: &tracev3.Tracing_Http{
+		//		Name: "envoy.tracers.zipkin",
+		//		ConfigType: &tracev3.Tracing_Http_TypedConfig{
+		//			TypedConfig: zipkinTypedConfig,
+		//		},
+		//	},
+		//},
 
 		RouteSpecifier: &hcm.HttpConnectionManager_RouteConfig{
 			RouteConfig: &routev3.RouteConfiguration{
@@ -635,45 +605,13 @@ func getCurrentListenerConfigurations() []*Config {
 	return CurrentListenerConfigurations
 }
 
-func removeClusterFromListener(route ListenerRoute, listenerName string) bool {
-	for i, config := range CurrentListenerConfigurations {
-		if config.ListenerConfiguration.ListenerName == listenerName {
-			changedConfig := config
-			for _, listenerRoute := range config.Routes {
-				if listenerRoute != route {
-					changedConfig.Routes = append(changedConfig.Routes, listenerRoute)
-				}
-			}
-			CurrentListenerConfigurations[i] = changedConfig
-			return true
-		}
-	}
-	return false
-}
-
-func removeClusterFromListenerGlobal(clusterToRemove string, listenerName string) bool {
-	for i, config := range CurrentListenerConfigurations {
-		if config.ListenerConfiguration.ListenerName == listenerName {
-			changedConfig := config
-			for _, listenerRoute := range config.Routes {
-				if listenerRoute.ClusterToUse != clusterToRemove {
-					changedConfig.Routes = append(changedConfig.Routes, listenerRoute)
-				}
-			}
-			CurrentListenerConfigurations[i] = changedConfig
-			return true
-		}
-	}
-	return false
-}
-
 func createRouteComponent(prefix string, routeToCluster string, regexRewrite *RegexRewriteDefinition) *routev3.Route {
-	// Gemeinsame Retry-Policy definieren
+	// Retry-Policy
 	retryPolicy := &routev3.RetryPolicy{
 		RetryOn:    "5xx,connect-failure,refused-stream",
 		NumRetries: &wrapperspb.UInt32Value{Value: 10},
 		RetryBackOff: &routev3.RetryPolicy_RetryBackOff{
-			BaseInterval: durationpb.New(50 * time.Millisecond), // Etwas Puffer für den Cluster-Warmup
+			BaseInterval: durationpb.New(50 * time.Millisecond),
 			MaxInterval:  durationpb.New(200 * time.Millisecond),
 		},
 	}
@@ -682,11 +620,10 @@ func createRouteComponent(prefix string, routeToCluster string, regexRewrite *Re
 		ClusterSpecifier: &routev3.RouteAction_Cluster{
 			Cluster: routeToCluster,
 		},
-		RetryPolicy: retryPolicy, // Policy wird hier für beide Fälle zugewiesen
+		RetryPolicy: retryPolicy,
 		Timeout:     durationpb.New(300 * time.Second),
 	}
 
-	// Falls Rewrite-Logik benötigt wird, hinzufügen
 	if regexRewrite != nil {
 		routeAction.RegexRewrite = &matcherv3.RegexMatchAndSubstitute{
 			Pattern: &matcherv3.RegexMatcher{
@@ -720,13 +657,12 @@ func pushClusterBlockList() error {
 	if err != nil {
 		return fmt.Errorf("failed to marshal JSON: %v", err)
 	}
-	println("JSON Data: ", string(jsonData))
 	resp, err := http.Post("http://gate:99/admin/config", "application/json",
 		bytes.NewBuffer(jsonData))
 	if err != nil {
 		return fmt.Errorf("failed to make request to nginx: %v", err)
 	}
-	defer resp.Body.Close() // Always close response body
+	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("bad status: %s", resp.Status)
@@ -750,8 +686,6 @@ func getKeysForValue(data map[string][]string, target string) []string {
 
 func removeString(list []string, target string) []string {
 	for i, item := range list {
-		println("REMOVE")
-		println(item, "  ", target)
 		if item == target {
 			return append(list[:i], list[i+1:]...)
 		}
@@ -761,25 +695,15 @@ func removeString(list []string, target string) []string {
 
 func updateBlockList(clusterName string, routesThere bool) error {
 	keys := getKeysForValue(ListenerUsingClusters, clusterName)
-	for _, key := range keys {
-		println("keys: ", key)
-	}
 	if len(keys) > 0 {
 		if !routesThere {
 			ClusterBlockList = append(ClusterBlockList, keys...)
 		} else if len(ClusterBlockList) > 0 {
 			for _, key := range keys {
-				print(key)
 				ClusterBlockList = removeString(ClusterBlockList, key)
 			}
 		}
 	}
-	println("Update Block List: ", ClusterBlockList)
-	println(clusterName)
-	println(routesThere)
-	formattedList := strings.Join(ClusterBlockList, ", ")
-	fmt.Println("\n--- Comma Separated ---")
-	fmt.Println(formattedList)
 	return nil
 }
 

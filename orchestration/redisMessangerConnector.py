@@ -40,7 +40,31 @@ class RedisMessangerConnector:
 
         pubsub.psubscribe("FAASFunctions/*", "__keyevent@0__:expired")
 
-        print("👂 Listening for FAAS events and TTL expirations...")
+        ascii_text = """
+        ███████╗ █████╗  █████╗ ███████╗                                  
+        ██╔════╝██╔══██╗██╔══██╗██╔════╝                                  
+        █████╗  ███████║███████║███████╗                                  
+        ██╔══╝  ██╔══██║██╔══██║╚════██║                                  
+        ██║     ██║  ██║██║  ██║███████║                                  
+        ╚═╝     ╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝                                  
+                                                                          
+        ██████╗ ██╗   ██╗███╗   ██╗███╗   ██╗██╗███╗   ██╗ ██████╗ ██╗    
+        ██╔══██╗██║   ██║████╗  ██║████╗  ██║██║████╗  ██║██╔════╝ ██║    
+        ██████╔╝██║   ██║██╔██╗ ██║██╔██╗ ██║██║██╔██╗ ██║██║  ███╗██║    
+        ██╔══██╗██║   ██║██║╚██╗██║██║╚██╗██║██║██║╚██╗██║██║   ██║╚═╝    
+        ██║  ██║╚██████╔╝██║ ╚████║██║ ╚████║██║██║ ╚████║╚██████╔╝██╗    
+        ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═══╝╚═╝  ╚═══╝╚═╝╚═╝  ╚═══╝ ╚═════╝ ╚═╝    
+                                                                          
+           ██████╗                                                        
+        ██╗██╔══██╗                                                       
+        ╚═╝██║  ██║                                                       
+        ██╗██║  ██║                                                       
+        ╚═╝██████╔╝                                                       
+           ╚═════╝                                                        
+                                                                                                                                                                                
+        """
+        print(ascii_text)
+        print("\n\nListening for FAAS events and TTL expirations...")
 
         for message in pubsub.listen():
             if message["type"] not in ("message", "pmessage"):
@@ -50,31 +74,27 @@ class RedisMessangerConnector:
             data = message.get("data")
 
             if "expired" in channel:
-                print(f"⏰ TTL EXPIRED: Key '{data}' is gone.")
+                print(f"\nTTL EXPIRED: Container '{data}' is going to be destroyed...")
                 self.handle_expiry(data)
                 continue
 
             if channel.startswith("FAASFunctions/"):
                 increment_event = True
-                decrement_event = False
 
                 for cluster_name, item in self.counter_tracker.items():
                     if cluster_name == channel:
                         increment_event = item < int(data)
-                        decrement_event = item > int(data)
 
                 self.counter_tracker[channel] = int(data)
 
                 if increment_event:
-                    print(f"\n📩 Standard Event on {channel}")
+                    print(f"\n=>> Standard Event on {channel}")
                     self.orchestrator.start_faas_container(channel.split("//")[1], "msadockerizedfaas-envoy-1")
-
-                    print(f"➕ Increment event → new value: {int(data)}")
                 else:
-                    print("Other Event ")
+                    print("Other Event...ignored")
                 continue
 
     def handle_expiry(self, data):
         container_name = data.split(":")[0]
         self.orchestrator.stop_and_remove_container(container_name)
-        print("Stopped " + container_name)
+        print("Successfully stopped " + container_name)
