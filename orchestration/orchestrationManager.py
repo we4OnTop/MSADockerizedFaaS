@@ -193,7 +193,7 @@ class OrchestrationManager:
         watcher_thread.start()
 
         try:
-            faas_network = self.get_router_network(router_container_name)
+            faas_network = self.get_router_network()
             faas_network.connect(faas_container)
         except Exception as e:
             print(f"Network error: {e}")
@@ -261,11 +261,11 @@ class OrchestrationManager:
             "replace": True
         }
 
-    def get_router_network(self, router_id: str):
-        network = self.client.networks.get(
-            "msadockerizedfaas_faas-net"
-        )
-        return network
+    def get_router_network(self):
+        print("Searching for network...")
+        networks = self.client.networks.list()
+        matching_networks = [n for n in networks if 'faas-net' in n.name]
+        return matching_networks[0]
 
     def get_image_tags(self, repo_name: str):
         found_tags = []
