@@ -7,7 +7,7 @@ We chose as an exercise the creation of a Function-as-a-Service Orchestrator usi
 - A scaling and load-balancing mechanism to create new containers and destroy existing ones, depending on the connections the current one has
 - A global orchestration mechanism to connect everything
 
-In the end a lot of different kinds of implementation and configuration needed to happen to make everything work together. 
+In the end a lot of different kinds of implementation and configuration needed to happen to make everything work together.
 
 ## Architecture
 
@@ -22,29 +22,34 @@ To understand the functionality we are going over every component used to unders
 4. __statsD Listener:__ Because under load new containers should be created statsD is used to capture UDP sended telemetry data by envoy to find out when an queue on an cluster is active because of too much connections and all in all help to tell the orchestrator, over redis, to launch new containers into this cluster.
 5. __Redis Server:__ Redis is used as an minimal database and an messager between the different components. Because information about running containers, when they should be removed or new should be launched can be set by different sources redis was used.
 6. __Redis REST Connector:__ Because Nginx and the lua script needed to talk to Redis also and no right dependency was found, an minimal REST-Server was implemented using GO to use basic needed actions inside of Nginx.
-7. __Orchestrator:__ The Brain of the whole application is the Orchestrator, it uses Python and implements the functionality to read information gathered by the different sources in redis and depending on that launch new containers and push the configuration to the needed components like the xDs Connector. 
+7. __Orchestrator:__ The Brain of the whole application is the Orchestrator, it uses Python and implements the functionality to read information gathered by the different sources in redis and depending on that launch new containers and push the configuration to the needed components like the xDs Connector.
 8. __FAAS Configurator:__ To create the functions that should be runned serverless in the architecture an pre defined setup was created. In this currently only Python is supported. This can be used to define an function as an Python file that can be talked to over REST. An mini-tutorial how to configure new functions is also inside of the ReadMe at the bottom.
 
-Everything is running in docker, in seperate containers and depending on the dependencies between them in different networks. 
+Everything is running in docker, in seperate containers and depending on the dependencies between them in different networks.
 
 All in all a little bit complicated but needed to enable the whole load scaling.
 
 ## Setup
 
 1. Start the Application
-   
-     > docker compose up
+
+   > docker compose up
+
+
+2.  Go into the `orchestration`-container and only if he is ready continue!
+
+    > In console should be written: __Listening for FAAS events and TTL expirations...__
 
 2. Send basic request
 
-    > click on  http://localhost:8080/hello
+   > click on  http://localhost:8080/hello
 
 3. You should see how a container is started to work on your request and if no other request accures in 10 seconds its destroyed again.
 
 
 ## Use predefined functions
 1. Switch to
-      > click on http://localhost:8080/dashboard
+   > click on http://localhost:8080/dashboard
 
 It should display the predefined functions.
 
@@ -57,7 +62,7 @@ Note: Some of the AI & Language Services are implemented but may cause timeouts 
 
 1. Create new folder in `faasRuntime/python/functions` with an unique name
 
-    > cd /faasRuntime/python/functions
+   > cd /faasRuntime/python/functions
 
 2. Use the template defined inside of `faasRuntime/template.txt` and create an Python file inside the folder, named by your choise.
 3. Define your function that should be executed
@@ -72,7 +77,7 @@ Note: Some of the AI & Language Services are implemented but may cause timeouts 
          function_folder: "example"
          extra_dependencies: ""
    ```
-   
+
 
 
 
@@ -81,6 +86,7 @@ Note: Some of the AI & Language Services are implemented but may cause timeouts 
 
 - Some bugs could accure, we tested the pre defined functions and they should work hopefully :D
 - If an error accours, try to restart and rebuild the containers. It worked mostly for us.
+- If one request leads to an undefined upstream, make another request and it should work. This could happen, but it shouldn't.
 
 
 Hopefully you like it :)
