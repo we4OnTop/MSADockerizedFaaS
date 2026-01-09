@@ -3,6 +3,10 @@ import io
 from PIL import Image
 from transformers import pipeline
 
+handler_run_config = {
+    "is_return_serialized": False
+}
+
 async def handle(request):
     data = await request.json() if request.method == "POST" else {}
     return {image_classifier(data["image"])}
@@ -10,8 +14,7 @@ async def handle(request):
 
 def image_classifier(base64_string):
     labels = ["Katze", "Hund", "Baum", "Auto", "Sonne", "Gebäude", "Flugzeug", "Blume", "Person"]
-    classifier = pipeline("zero-shot-image-classification", model="openai/clip-vit-large-patch14")
-
+    classifier = pipeline("zero-shot-image-classification", model="openai/clip-vit-base-patch32")
     try:
         if "," in base64_string:
             base64_string = base64_string.split(",")[1]

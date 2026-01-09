@@ -1,6 +1,9 @@
 from transformers import pipeline
 import soundfile as sf
 
+handler_run_config = {
+    "is_return_serialized": False
+}
 
 async def handle(request):
     data = await request.json() if request.method == "POST" else {}

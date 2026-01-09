@@ -1,5 +1,9 @@
 from transformers import pipeline
 
+handler_run_config = {
+    "is_return_serialized": False
+}
+
 async def handle(request):
     data = await request.json() if request.method == "POST" else {}
     return {text_generation(data["text"])}

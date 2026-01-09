@@ -6,7 +6,6 @@ handler_run_config = {
 
 async def handle(request):
     data = await request.json() if request.method == "POST" else {}
-    print("NEW REQUEST!!!! IN HANDLE")
 
     html_content = """
     <!DOCTYPE html>

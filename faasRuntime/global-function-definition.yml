@@ -1,62 +1,115 @@
 usable-functions:
   text-summarization:
     name: "summary"
-    version: 0.1
+    version: 1.7
     configuration:
       programing_language: "python"
       base_function_file_name: "text_summarization.py"
       function_folder: "text_summarization"
-      extra_dependencies: "transformers torch sentencepiece"
+      # FIX: --extra-index-url statt --index-url
+      extra_dependencies: "transformers torch --extra-index-url https://download.pytorch.org/whl/cpu sentencepiece"
 
   text-classifier:
     name: "text-classifier"
-    version: 0.1
+    version: 0.4
     configuration:
       programing_language: "python"
       base_function_file_name: "text_classifier.py"
       function_folder: "text_classifier"
-      extra_dependencies: "transformers torch"
+      # FIX: --extra-index-url
+      extra_dependencies: "transformers torch --extra-index-url https://download.pytorch.org/whl/cpu"
 
   text-generator:
     name: "text-generator"
-    version: 0.1
+    version: 0.2
     configuration:
       programing_language: "python"
       base_function_file_name: "text_generator.py"
       function_folder: "text_generator"
-      extra_dependencies: "transformers torch"
+      # FIX: --extra-index-url
+      extra_dependencies: "transformers torch --extra-index-url https://download.pytorch.org/whl/cpu"
 
   text-to-audio:
     name: "t2s"
-    version: 0.1
+    version: 0.2
     configuration:
       programing_language: "python"
       base_function_file_name: "text_to_speech.py"
       function_folder: "text_to_speech"
-    extra_dependencies: "transformers, torch, datasets, soundfile, sentencepiece"
+      # FIX: Einrückung korrigiert (gehört unter configuration) und --extra-index-url
+      extra_dependencies: "transformers torch --extra-index-url https://download.pytorch.org/whl/cpu datasets soundfile sentencepiece"
 
   image-classifier:
     name: "image-classifier"
-    version: 0.1
+    version: 0.2
     configuration:
       programing_language: "python"
       base_function_file_name: "zero_shot_image_classifier.py"
       function_folder: "zero_shot_image_classifier"
-      extra_dependencies: "transformers torch Pillow accelerate"
+      # FIX: --extra-index-url
+      extra_dependencies: "transformers torch --extra-index-url https://download.pytorch.org/whl/cpu Pillow accelerate"
 
   other_hello:
     name: "hello_function_2"
-    version: 0.1
+    version: 0.2
     configuration:
       programing_language: "python"
       base_function_file_name: "hello.py"
       function_folder: "hello"
       extra_dependencies: ""
+
   hello:
     name: "hello"
-    version: 1.6
+    version: 2.0
     configuration:
       programing_language: "python"
       base_function_file_name: "hello.py"
       function_folder: "hello"
+      extra_dependencies: ""
+
+
+  dashboard:
+    name: "dashboard"
+    version: 0.7
+    configuration:
+      programing_language: "python"
+      base_function_file_name: "dashboard.py"
+      function_folder: "dashboard"
+      extra_dependencies: ""
+
+
+  addition:
+    name: "addition"
+    version: 0.1
+    configuration:
+      programing_language: "python"
+      base_function_file_name: "addition.py"
+      function_folder: "addition"
+      extra_dependencies: ""
+
+  subtract:
+    name: "subtract"
+    version: 0.1
+    configuration:
+      programing_language: "python"
+      base_function_file_name: "subtract.py"
+      function_folder: "subtract"
+      extra_dependencies: ""
+
+  multiply:
+    name: "multiply"
+    version: 0.1
+    configuration:
+      programing_language: "python"
+      base_function_file_name: "multiply.py"
+      function_folder: "multiply"
+      extra_dependencies: ""
+
+  devision:
+    name: "devision"
+    version: 0.1
+    configuration:
+      programing_language: "python"
+      base_function_file_name: "devision.py"
+      function_folder: "devision"
       extra_dependencies: ""

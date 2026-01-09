@@ -1,8 +1,21 @@
 from transformers import pipeline
 
+handler_run_config = {
+    "is_return_serialized": False
+}
+
 async def handle(request):
-    data = await request.json() if request.method == "POST" else {}
-    return {text_classify(data["text"])}
+    try:
+        data = await request.json() if request.method == "POST" else {}
+        if "text" not in data:
+            return {"error": "No text provided"}, 400
+
+        classification_result = text_classify(data["text"])
+        return {"classification": classification_result}
+
+    except Exception as e:
+        print(f"Error: {e}")
+        return {"error": str(e)}, 500
 
 
 def text_classify(text):
