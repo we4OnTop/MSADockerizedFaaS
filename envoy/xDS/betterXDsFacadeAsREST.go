@@ -212,9 +212,20 @@ func (s *AccessLogService) StreamAccessLogs(stream accesslogv3.AccessLogService_
 					if faasName != "not-found" {
 						// Your existing logic
 						log.Printf("Using FAAS Name %s", faasName)
-						s.RedisClient.Set(ctx, faasName+":"+faasName, 1, 0) // Added 0 for no expiration on this key
-						s.RedisClient.Incr(ctx, faasName+":timer")
-						s.RedisClient.Expire(ctx, faasName+":timer", 10*time.Second)
+						//s.RedisClient.Incr(ctx, faasName+":"+faasName) // Added 0 for no expiration on this key
+						val, err := s.RedisClient.Get(ctx, faasName+":"+faasName).Int()
+
+						// Falls der Key nicht existiert (Redis gibt Fehler), bedeutet das 0 aktive Requests
+						if err != nil {
+							val = 0
+						}
+
+						if val-1 == 0 {
+							s.RedisClient.Incr(ctx, faasName+":timer")
+							s.RedisClient.Expire(ctx, faasName+":timer", 10*time.Second)
+						}
+
+						s.RedisClient.Decr(ctx, faasName+":"+faasName)
 
 						// New: Publish to a channel named after the faasName
 						channel := faasName + "/events"
@@ -223,7 +234,7 @@ func (s *AccessLogService) StreamAccessLogs(stream accesslogv3.AccessLogService_
 						// Publish returns the number of subscribers that received the message
 						subscribers, err := s.RedisClient.Publish(ctx, channel, payload).Result()
 						if err != nil {
-							// Handle error (e.g., log.Printf("redis publish error: %v", err))
+							log.Printf("redis publish error: %v", err)
 						}
 
 						_ = subscribers // Useful if you want to verify someone is listening

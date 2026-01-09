@@ -1,6 +1,11 @@
+import asyncio
 import os
+import subprocess
 import threading
 import uuid
+
+import redis
+from asyncore import loop
 from concurrent.futures.thread import ThreadPoolExecutor
 from pathlib import Path
 
@@ -16,6 +21,7 @@ class OrchestrationManager:
             "FAAS_CONFIG_YAML_PATH",
             "./../faasRuntime/global-function-definition.yml"
         )
+        self.redis_host = os.environ.get('REDIS_URL', 'localhost')
         self.faas_root_folder_path = os.environ.get("FAAS_ROOT_FOLDER_PATH", "./../faasRuntime")
         self.BASE_FAAS_PORT = os.environ.get("BASE_FAAS_PORT", "5000")
         self.ENVOY_XDS_ADDRESS = os.environ.get("ENVOY_XDS_ADDRESS", "xds_connector:8081")
@@ -103,34 +109,73 @@ class OrchestrationManager:
 
 
     def build_image(self, context_path: str, dockerfile: str, function_name: str, version: str, buildargs: dict[str, str]):
-        image, logs = self.client.images.build(
+        print(f"[{function_name}] Starting build...")
+
+        # Use the low-level API (client.api) to get a stream of logs
+        response_stream = self.client.api.build(
             path=context_path,
             dockerfile=dockerfile,
             tag=f"{function_name}:{version}",
             buildargs=buildargs,
-            nocache = True
+            nocache=False,  # Keep this FALSE for speed!
+            rm=True,        # Remove intermediate containers
+            decode=True     # Decodes the JSON stream automatically
         )
-        print(f"Built image: {image}")
+
+        for chunk in response_stream:
+            # 1. Catch Errors immediately
+            if 'error' in chunk:
+                raise Exception(f"[{function_name}] Build Error: {chunk['error']}")
+
+            # 2. Print "Step" logs (e.g., "Step 1/5 : RUN pip install...")
+            if 'stream' in chunk:
+                line = chunk['stream'].strip()
+                if line:
+                    print(f"[FAAS-Image-building...][{function_name}] {line}")
+
+            # 3. Print Download Status (e.g., "Downloading", "Extracting")
+            # Note: We skip the detailed progress bar strings because they clutter the logs in multi-threading
+            elif 'status' in chunk:
+                status = chunk['status']
+                # Only print major status updates to avoid spamming the console
+                if "Downloading" in status or "Extracting" in status:
+                    # Optional: Print ID if available (e.g., layer hash)
+                    layer_id = chunk.get('id', '')
+                    print(f"[{function_name}] Docker Layer {layer_id}: {status}")
+
+        print(f"[{function_name}] Build Complete.")
+        return f"{function_name}:{version}"
 
     def _log_watcher_thread(self, container_name, faas_name, ready_signal):
-        print(f"🔍 [Log-Watcher] Suche in {container_name} nach: '{ready_signal}'")
+        r = redis.Redis(host=self.redis_host, port=6379, db=0)
+
+        print(f"[Log-Watcher] Suche in {container_name} nach: '{ready_signal}'")
         try:
             container = self.client.containers.get(container_name)
             log_stream = container.logs(stream=True, follow=True)
 
             for line in log_stream:
                 if ready_signal in line.decode('utf-8'):
-                    print(f"✨ [Log-Watcher] Signal '{ready_signal}' gefunden!")
+                    print(f"[Log-Watcher] Signal '{ready_signal}' gefunden!")
+
+                    r.set(f"{container_name}:timer", 1, ex=30)
+
                     self.append_updated_faas_containers(faas_name)
                     break
+
         except Exception as e:
-            print(f"❌ [Log-Watcher] Fehler: {e}")
+            print(f"[Log-Watcher] Fehler: {e}")
 
     def start_faas_container(self, faas_name: str, router_container_name: str,  **run_kwargs):
         uuid_for_faas = uuid.uuid4()
         container_name = f"FAAS-{uuid_for_faas}-container"
 
         READY_SIGNAL = "running on"
+
+        payload = {
+            "CONTAINER_NAME": container_name,
+            "REDIS_HOST": self.redis_host
+        }
 
         print(f"🚀 Starte FaaS-Container: {container_name}")
         try:
@@ -139,6 +184,7 @@ class OrchestrationManager:
                 image_tag,
                 name=container_name,
                 detach=True,
+                environment=payload,
                 **run_kwargs
             )
         except Exception as e:
@@ -164,9 +210,6 @@ class OrchestrationManager:
             self.active_containers_dict[faas_name] = [f"{uuid_for_faas}"]
 
         return faas_container
-
-    #TODO: IRGENDWO IST DIE UUID GLEICH GENOMMEN ABER GEHT JAAAA CA. FEHLT NOCH STATSD UND FEHLER ANFANG
-
 
 
     def change_health_of_faas_in_cluster(self, faas_name: str, status: str):

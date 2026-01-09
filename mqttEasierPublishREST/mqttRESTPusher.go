@@ -146,3 +146,31 @@ func PushFAASRemove(r *gin.Engine, client *redis.Client, RemoveFaasRedisTopic st
 		c.JSON(200, gin.H{"status": "ok", "new_value": key})
 	})
 }
+
+type FAASTimerInfPayload struct {
+	ContainerId string `json:"container_id"`
+}
+
+func PushFAASTimerInf(r *gin.Engine, client *redis.Client, AddFaasRedisTopic string) {
+	r.POST("/pushFAASTimerToInf", func(c *gin.Context) {
+		var input FAASTimerInfPayload
+
+		if err := c.ShouldBindJSON(&input); err != nil {
+			c.JSON(400, gin.H{"error": err.Error()})
+			return
+		}
+
+		client.Expire(ctx, input.ContainerId+":timer", 0)
+
+		// New: Publish to a channel named after the faasName
+		channel := input.ContainerId + "/events"
+		payload := "updated"
+
+		// Publish returns the number of subscribers that received the message
+		_, err := client.Publish(ctx, channel, payload).Result()
+		if err != nil {
+			log.Printf("redis publish error: %v", err)
+		}
+
+	})
+}
