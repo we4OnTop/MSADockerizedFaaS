@@ -35,6 +35,11 @@ All in all a little bit complicated but needed to enable the whole load scaling.
    
      > docker compose up
 
+   
+2.  Go into the `orchestration`-container and only if he is ready continue!
+
+     > In console should be written: __Listening for FAAS events and TTL expirations...__
+
 2. Send basic request
 
     > click on  http://localhost:8080/hello
@@ -81,6 +86,7 @@ Note: Some of the AI & Language Services are implemented but may cause timeouts 
 
 - Some bugs could accure, we tested the pre defined functions and they should work hopefully :D
 - If an error accours, try to restart and rebuild the containers. It worked mostly for us.
+- If one request leads to an undefined upstream, make another request and it should work. This could happen, but it shouldn't.
 
 
 Hopefully you like it :)
