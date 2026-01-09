@@ -6,7 +6,6 @@ usable-functions:
       programing_language: "python"
       base_function_file_name: "text_summarization.py"
       function_folder: "text_summarization"
-      # FIX: --extra-index-url statt --index-url
       extra_dependencies: "transformers torch --extra-index-url https://download.pytorch.org/whl/cpu sentencepiece"
 
   text-classifier:
@@ -16,7 +15,6 @@ usable-functions:
       programing_language: "python"
       base_function_file_name: "text_classifier.py"
       function_folder: "text_classifier"
-      # FIX: --extra-index-url
       extra_dependencies: "transformers torch --extra-index-url https://download.pytorch.org/whl/cpu"
 
   text-generator:
@@ -26,7 +24,6 @@ usable-functions:
       programing_language: "python"
       base_function_file_name: "text_generator.py"
       function_folder: "text_generator"
-      # FIX: --extra-index-url
       extra_dependencies: "transformers torch --extra-index-url https://download.pytorch.org/whl/cpu"
 
   text-to-audio:
@@ -36,7 +33,6 @@ usable-functions:
       programing_language: "python"
       base_function_file_name: "text_to_speech.py"
       function_folder: "text_to_speech"
-      # FIX: Einrückung korrigiert (gehört unter configuration) und --extra-index-url
       extra_dependencies: "transformers torch --extra-index-url https://download.pytorch.org/whl/cpu datasets soundfile sentencepiece"
 
   image-classifier:
@@ -46,7 +42,6 @@ usable-functions:
       programing_language: "python"
       base_function_file_name: "zero_shot_image_classifier.py"
       function_folder: "zero_shot_image_classifier"
-      # FIX: --extra-index-url
       extra_dependencies: "transformers torch --extra-index-url https://download.pytorch.org/whl/cpu Pillow accelerate"
 
   other_hello:

@@ -10,7 +10,7 @@ async def handle(request):
 
         val1 = int(data.get("value1", 0))
         val2 = int(data.get("value2", 0))
-        ergebnis = val1 * val2
+        ergebnis = val1 + val2
 
         return JSONResponse({"result": ergebnis})
 
