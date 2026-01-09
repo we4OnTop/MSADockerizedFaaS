@@ -75,7 +75,7 @@ usable-functions:
 
   addition:
     name: "addition"
-    version: 0.1
+    version: 0.2
     configuration:
       programing_language: "python"
       base_function_file_name: "addition.py"
